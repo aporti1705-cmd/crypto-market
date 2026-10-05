@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Krypto Markt – Live-Kurse & Signale</title>
+  <meta name="description" content="Aktuelle Krypto-Kurse mit automatisch berechnetem Ausblick und Kauf-/Verkaufssignal.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div>
+        <h1>Krypto Markt</h1>
+        <p class="sub">Live-Kurse der Top 50 Coins mit technischem Ausblick</p>
+      </div>
+      <div class="status">
+        <span id="dot" class="dot"></span>
+        <span id="updated">Lade Kurse …</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="summary" class="summary" aria-label="Marktüberblick"></section>
+
+    <section class="controls">
+      <input id="search" type="search" placeholder="Coin suchen (z. B. Bitcoin, ETH) …" aria-label="Coin suchen">
+      <div class="chips" id="filters" role="group" aria-label="Nach Signal filtern">
+        <button data-filter="all" class="chip active">Alle</button>
+        <button data-filter="buy" class="chip">Kaufen</button>
+        <button data-filter="hold" class="chip">Halten</button>
+        <button data-filter="sell" class="chip">Verkaufen</button>
+      </div>
+      <div class="chips" id="currency" role="group" aria-label="Währung">
+        <button data-currency="eur" class="chip active">EUR</button>
+        <button data-currency="usd" class="chip">USD</button>
+        <button data-currency="chf" class="chip">CHF</button>
+      </div>
+    </section>
+
+    <div id="error" class="error" hidden></div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="num col-rank">#</th>
+            <th>Coin</th>
+            <th class="num">Kurs</th>
+            <th class="num">24 h</th>
+            <th class="num col-7d">7 T</th>
+            <th class="num col-30d">30 T</th>
+            <th class="num col-cap">Marktkap.</th>
+            <th class="col-chart">7-Tage-Verlauf</th>
+            <th class="col-outlook">Ausblick</th>
+            <th>Signal</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="10" class="empty">Lade Kurse …</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <section class="note">
+      <h2>So entstehen die Signale</h2>
+      <p>
+        Ausblick und Signal werden automatisch aus den Kursdaten der letzten 7 bzw. 30 Tage berechnet:
+        RSI (überkauft/überverkauft), Trend (24-Stunden-Schnitt gegenüber 7-Tage-Schnitt) und Momentum
+        (Veränderung über 24 Stunden und 30 Tage). Ein Klick auf einen Coin zeigt, wie sein Signal zustande kommt.
+      </p>
+      <p class="disclaimer">
+        <strong>Keine Anlageberatung.</strong> Die Signale sind rein rechnerische Indikatoren, berücksichtigen weder
+        Nachrichten noch deine persönliche Situation und können falsch liegen. Kryptowährungen sind hochriskant –
+        investiere nur Geld, dessen Verlust du verkraften kannst.
+      </p>
+      <p class="source">Kursdaten: <a href="https://www.coingecko.com/" target="_blank" rel="noopener">CoinGecko</a> · Aktualisierung alle 60 Sekunden</p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
