@@ -351,7 +351,7 @@ export function marketIndex(coins, btcInd, fng, news) {
 // ---------- Nachrichten ----------
 
 const POSITIVE = /\b(surg\w*|soar\w*|rall(y|ies|ied)|jump\w*|climb\w*|gains?|record high|all[- ]time high|bullish|breakout|approv\w*|inflows?|adopt\w*|partner\w*|integrat\w*|launch\w*|upgrade\w*|mainnet|listing|listed|accumulat\w*|buys?|bought|purchas\w*|invest\w*|funding|raises?|raised|reclaim\w*|rebound\w*|recover\w*|outperform\w*|milestone|expand\w*|wins?|boost\w*|rises?|rose|tops?|strong\w*|optimis\w*)\b/gi;
-const NEGATIVE = /\b(hack\w*|exploit\w*|breach\w*|stolen|theft|drain\w*|rug ?pull|scam\w*|fraud\w*|lawsuit|sue[sd]?|charges?|charged|indict\w*|investigat\w*|probe|bans?|banned|crackdown|delist\w*|bankrupt\w*|insolven\w*|collaps\w*|crash\w*|plung\w*|plummet\w*|tumbl\w*|slump\w*|sell[- ]?off|liquidat\w*|outage|halt\w*|depeg\w*|vulnerab\w*|dump\w*|bearish|warn\w*|fears?|loss(es)?|declin\w*|drops?|dropped|falls?|fell|sinks?|sank|outflows?|sanction\w*|reject\w*|slides?|slid|weak\w*|risks?|concerns?|struggl\w*)\b/gi;
+const NEGATIVE = /\b(hack\w*|exploit\w*|breach\w*|stolen|theft|drain\w*|rug ?pull|scam\w*|fraud\w*|lawsuit|sue[sd]?|charges?|charged|indict\w*|investigat\w*|probe|bans?|banned|crackdown|delist\w*|bankrupt\w*|insolven\w*|collaps\w*|crash\w*|plung\w*|plummet\w*|tumbl\w*|slump\w*|sell[- ]?off|liquidat\w*|outage|halt\w*|depeg\w*|vulnerab\w*|dump\w*|bearish|warn\w*|fears?|loss(es)?|declin\w*|drops?|dropped|falls?|fell|sinks?|sank|outflows?|sanction\w*|reject\w*|slides?|slid|weak\w*|risks?|concerns?|struggl\w*|down|shut\w*|worr(y|ied|ies)|wobbl\w*|uncertain\w*)\b/gi;
 const NEWS_WINDOW_MS = 7 * 86_400_000;
 
 // Einfache Stichwort-Auswertung der Schlagzeilen. Erkennt keine Ironie und keinen Zusammenhang –
