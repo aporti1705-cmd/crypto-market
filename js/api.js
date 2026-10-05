@@ -60,7 +60,8 @@ const histories = new Map();
 
 export async function history(symbol) {
   const pair = symbol.toUpperCase() + 'USDT';
-  if (histories.has(pair)) return histories.get(pair);
+  const hit = histories.get(pair);
+  if (hit && Date.now() - hit.time < CHART_TTL_MS) return hit.data;
   let rows = [], end = Date.now();
   for (let k = 0; k < 2 && rows.length < DAYS_4Y; k++) {
     const res = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(pair)}&interval=1d&limit=1000&endTime=${end}`);
@@ -76,7 +77,7 @@ export async function history(symbol) {
     // Spalten: 0 = Tagesbeginn, 4 = Schlusskurs, 7 = Handelsvolumen in USDT
     return { t: cut.map((r) => r[0]), p: cut.map((r) => Number(r[4])), v: cut.map((r) => Number(r[7])) };
   })() : null;
-  histories.set(pair, data);
+  histories.set(pair, { time: Date.now(), data });
   return data;
 }
 

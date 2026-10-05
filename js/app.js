@@ -7,6 +7,7 @@ const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevo
 const PAGE_INTERVAL_MS = 30_000;
 const RETRY_MS = 30_000;
 const FNG_REFRESH_MS = 30 * 60_000;
+const BTC_REFRESH_MS = 10 * 60_000;
 const NO_REGIME = { score: null, factors: [] };
 const PAGE_SIZE = 100;
 const RISK_WEIGHT = [1, 0.9, 0.75, 0.55];   // Abwertung im Ranking je Risikostufe
@@ -20,7 +21,7 @@ const DERIVATIVE = /wrapped|staked|staking|bridged|restaked|\busd|usd\b/i;
 
 const state = {
   raw: new Map(), coins: [], byId: new Map(), bySymbol: new Map(), byName: new Map(),
-  market: null, fng: null, btcInd: null, marketNews: null,
+  market: null, fng: null, btcData: null, btcInd: null, marketNews: null,
   sort: { key: 'rank', dir: 1 }, page: 1, query: '', filter: 'all',
   gen: 0, nextPage: 1, pagesLoaded: 0, updated: null,
 };
@@ -32,7 +33,14 @@ let current = null;
 
 function rebuild() {
   const coins = [...state.raw.values()].sort((a, b) => (a.market_cap_rank ?? 1e9) - (b.market_cap_rank ?? 1e9));
+  // Marktphase immer mit dem aktuellen Bitcoin-Kurs rechnen, nicht mit dem Stand beim Laden der Tageskurse
+  const btc = state.raw.get('bitcoin');
+  if (state.btcData && isNum(btc?.current_price)) {
+    const { t, p, v } = state.btcData;
+    state.btcInd = prepare(t, [...p.slice(0, -1), btc.current_price], v);
+  }
   state.market = marketIndex(coins, state.btcInd, state.fng, state.marketNews);
+  if (state.market) state.market.time = new Date();
   const regime = state.market?.regime ?? NO_REGIME;
   state.bySymbol.clear(); state.byName.clear();
   for (const c of coins) {
@@ -126,21 +134,30 @@ async function fngLoop() {
   }
 }
 
-// Bitcoin-Tageskurse für die Marktphase; ohne sie rechnet das Modell mit einer einfacheren Ersatzgröße
-async function loadBitcoin() {
-  try {
-    const data = await api.history('BTC');
-    if (!data) return;
-    state.btcInd = prepare(data.t, data.p, data.v);
-    if (state.coins.length) { rebuild(); current?.update(); }
-  } catch { /* Binance nicht erreichbar */ }
+// Bitcoin-Tageskurse für die Marktphase; ohne sie rechnet das Modell mit einer einfacheren Ersatzgröße.
+// Der letzte Tageskurs wird in rebuild() laufend durch den Live-Kurs ersetzt.
+async function bitcoinLoop() {
+  for (;;) {
+    try {
+      const data = await api.history('BTC');
+      if (data) {
+        state.btcData = data;
+        state.btcInd = prepare(data.t, data.p, data.v);
+        if (state.coins.length) { rebuild(); current?.update(); }
+      }
+    } catch { /* Binance nicht erreichbar */ }
+    await sleep(BTC_REFRESH_MS);
+  }
 }
 
-async function loadMarketNews() {
-  try {
-    state.marketNews = analyseNews(await api.marketNews());
-    if (state.coins.length) { rebuild(); current?.update(); }
-  } catch { /* Seite funktioniert auch ohne Nachrichten */ }
+async function newsLoop() {
+  for (;;) {
+    try {
+      state.marketNews = analyseNews(await api.marketNews());
+      if (state.coins.length) { rebuild(); current?.update(); }
+    } catch { /* Seite funktioniert auch ohne Nachrichten */ }
+    await sleep(FNG_REFRESH_MS);
+  }
 }
 
 // ---------- Bausteine ----------
@@ -181,6 +198,14 @@ function gauge(value, colors) {
 }
 
 const SELL_TO_BUY = ['var(--down)', 'var(--warn)', 'var(--hold)', 'var(--mild)', 'var(--up)'];
+
+const NOW_ANSWER = {
+  'Kaufen': 'Ja – der Markt spricht im Moment klar für Käufe.',
+  'Eher kaufen': 'Eher ja – das Umfeld ist im Moment günstig.',
+  'Halten': 'Abwarten – im Moment kein klarer Vorteil.',
+  'Eher verkaufen': 'Eher nein – das Umfeld ist im Moment ungünstig.',
+  'Verkaufen': 'Nein – der Markt spricht im Moment klar gegen Käufe.',
+};
 
 const fngLabel = (v) => (v <= 24 ? 'Extreme Angst' : v <= 46 ? 'Angst' : v <= 54 ? 'Neutral' : v <= 75 ? 'Gier' : 'Extreme Gier');
 
@@ -258,9 +283,10 @@ function marketView() {
 
   function hero() {
     const m = state.market;
-    $('#g-market').innerHTML = m ? `<div class="label">Markt-Index</div>${gauge(m.value, SELL_TO_BUY)}
-        <div class="gauge-value">${m.value}<small> / 100</small></div>${badge(m, 'big')}`
-      : '<div class="label">Markt-Index</div><p class="muted">Wird berechnet …</p>';
+    $('#g-market').innerHTML = m ? `<div class="label">Jetzt kaufen?</div>${gauge(m.value, SELL_TO_BUY)}
+        <div class="gauge-value">${m.value}<small> / 100</small></div>${badge(m, 'big')}
+        <div class="hint">${NOW_ANSWER[m.label]}<br>Berechnet um ${m.time.toLocaleTimeString('de-DE')} aus den aktuellen Kursen</div>`
+      : '<div class="label">Jetzt kaufen?</div><p class="muted">Wird berechnet …</p>';
     const f = state.fng;
     $('#g-fng').innerHTML = f ? `<div class="label">Fear &amp; Greed Index</div>${gauge(f.value, SELL_TO_BUY)}
         <div class="gauge-value">${f.value}<small> / 100</small></div><span class="badge none big">${fngLabel(f.value)}</span>
@@ -779,5 +805,5 @@ window.addEventListener('hashchange', route);
 route();
 marketLoop();
 fngLoop();
-loadBitcoin();
-loadMarketNews();
+bitcoinLoop();
+newsLoop();
