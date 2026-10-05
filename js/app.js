@@ -1,15 +1,16 @@
 import { $, esc, settings, sleep, isNum, money, compact, num, signed, tone, pct } from './util.js';
 import * as api from './api.js';
 import * as pf from './portfolio.js';
-import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook } from './model.js';
+import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
 const PAGE_INTERVAL_MS = 30_000;
 const RETRY_MS = 30_000;
 const FNG_REFRESH_MS = 30 * 60_000;
+const NO_REGIME = { score: null, factors: [] };
 const PAGE_SIZE = 100;
 const RISK_WEIGHT = [1, 0.9, 0.75, 0.55];   // Abwertung im Ranking je Risikostufe
-const CACHE_KEY = 'krypto-markt-kurse';
+const CACHE_KEY = 'krypto-markt-kurse-usd';
 const CACHE_FIELDS = ['id', 'symbol', 'name', 'image', 'current_price', 'market_cap', 'market_cap_rank', 'total_volume',
   'high_24h', 'low_24h', 'ath', 'ath_change_percentage', 'circulating_supply', 'max_supply',
   'price_change_percentage_24h_in_currency', 'price_change_percentage_7d_in_currency', 'price_change_percentage_14d_in_currency',
@@ -19,7 +20,7 @@ const DERIVATIVE = /wrapped|staked|staking|bridged|restaked|\busd|usd\b/i;
 
 const state = {
   raw: new Map(), coins: [], byId: new Map(), bySymbol: new Map(), byName: new Map(),
-  market: null, fng: null, rates: null,
+  market: null, fng: null, btcInd: null, marketNews: null,
   sort: { key: 'rank', dir: 1 }, page: 1, query: '', filter: 'all',
   gen: 0, nextPage: 1, pagesLoaded: 0, updated: null,
 };
@@ -31,13 +32,11 @@ let current = null;
 
 function rebuild() {
   const coins = [...state.raw.values()].sort((a, b) => (a.market_cap_rank ?? 1e9) - (b.market_cap_rank ?? 1e9));
-  const btc = state.raw.get('bitcoin');
-  if (btc) btc.analysis = quickAnalyse(btc);
-  state.market = marketIndex(coins, state.fng);
-  const regime = state.market?.regime ?? 0;
+  state.market = marketIndex(coins, state.btcInd, state.fng, state.marketNews);
+  const regime = state.market?.regime ?? NO_REGIME;
   state.bySymbol.clear(); state.byName.clear();
   for (const c of coins) {
-    if (c !== btc) c.analysis = quickAnalyse(c, regime);
+    c.analysis = quickAnalyse(c, regime);
     // Bei doppelten Kürzeln gewinnt der Coin mit der größeren Marktkapitalisierung
     if (!state.bySymbol.has(c.symbol.toLowerCase())) state.bySymbol.set(c.symbol.toLowerCase(), c);
     if (!state.byName.has(c.name.toLowerCase())) state.byName.set(c.name.toLowerCase(), c);
@@ -63,14 +62,14 @@ function saveCache() {
     out.sparkline_in_7d = { price: (c.sparkline_in_7d?.price || []).map((p) => Number(p.toPrecision(5))) };
     return out;
   });
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ currency: settings.currency, time: state.updated.getTime(), coins })); } catch {}
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ time: state.updated.getTime(), coins })); } catch {}
 }
 
 // Gibt das Alter der gespeicherten Kurse in Millisekunden zurück, ohne Treffer Infinity
 function restoreCache() {
   try {
     const cache = JSON.parse(localStorage.getItem(CACHE_KEY));
-    if (cache?.currency !== settings.currency || !Array.isArray(cache.coins)) return Infinity;
+    if (!Array.isArray(cache?.coins)) return Infinity;
     for (const c of cache.coins) state.raw.set(c.id, c);
     state.pagesLoaded = Math.min(api.PAGES, Math.ceil(cache.coins.length / 250));
     state.updated = new Date(cache.time);
@@ -120,22 +119,28 @@ async function fngLoop() {
   for (;;) {
     try {
       const data = await api.fearGreed();
-      state.fng = { value: data[0].value, history: data };
+      state.fng = { value: data[0].value, history: data, byDay: new Map(data.map((d) => [Math.floor(d.time / 86_400_000), d.value])) };
       if (state.coins.length) { rebuild(); current?.update(); }
     } catch { /* Seite funktioniert auch ohne Fear & Greed */ }
     await sleep(FNG_REFRESH_MS);
   }
 }
 
-function setCurrency(currency) {
-  if (currency === settings.currency) return;
-  settings.currency = currency;
-  for (const b of $('#currency').children) b.classList.toggle('active', b.dataset.currency === currency);
-  state.raw = new Map(); state.coins = []; state.byId = state.raw; state.market = null;
-  state.pagesLoaded = 0; state.nextPage = 1; state.updated = null;
-  setStatus(null);
-  current?.update();
-  marketLoop();
+// Bitcoin-Tageskurse für die Marktphase; ohne sie rechnet das Modell mit einer einfacheren Ersatzgröße
+async function loadBitcoin() {
+  try {
+    const data = await api.history('BTC');
+    if (!data) return;
+    state.btcInd = prepare(data.t, data.p, data.v);
+    if (state.coins.length) { rebuild(); current?.update(); }
+  } catch { /* Binance nicht erreichbar */ }
+}
+
+async function loadMarketNews() {
+  try {
+    state.marketNews = analyseNews(await api.marketNews());
+    if (state.coins.length) { rebuild(); current?.update(); }
+  } catch { /* Seite funktioniert auch ohne Nachrichten */ }
 }
 
 // ---------- Bausteine ----------
@@ -333,7 +338,7 @@ function marketView() {
 
 // ---------- Detailansicht ----------
 
-const RANGES = { '7T': 7, '30T': 30, '90T': 90, '1J': 365 };
+const RANGES = { '7T': 7, '30T': 30, '90T': 90, '1J': 365, '4J': 1461 };
 
 function drawChart(el, { t, p, overlays = [], hourly }) {
   if (p.length < 2) { el.innerHTML = '<p class="muted">Keine Kursdaten für diesen Zeitraum.</p>'; return; }
@@ -398,7 +403,8 @@ function drawChart(el, { t, p, overlays = [], hourly }) {
 }
 
 function detailView(id) {
-  const d = { range: '1J', currency: null, data: null, ind: null, error: null };
+  const d = { range: '1J', started: false, data: null, ind: null, source: null, error: null,
+    tests: null, testsWithRegime: null, news: null, newsError: null };
   view.innerHTML = `
     <a class="back" href="#/">← Zurück zur Übersicht</a>
     <div id="d-head"></div>
@@ -408,6 +414,7 @@ function detailView(id) {
       <div id="chart" class="chart"><p class="muted">Lade Kursverlauf …</p></div>
     </section>
     <div id="d-forecast"></div>
+    <div id="d-news"></div>
     <div id="d-stats"></div>`;
 
   $('#ranges').addEventListener('click', (e) => {
@@ -420,19 +427,28 @@ function detailView(id) {
 
   const self = { update };
 
-  async function loadChart() {
-    const currency = settings.currency;
-    d.currency = currency; d.data = null; d.ind = null; d.error = null;
+  async function loadData(c) {
     try {
-      const data = await api.chart(id, currency);
-      if (current !== self || currency !== settings.currency) return;
+      let data = null;
+      try { data = await api.history(c.symbol); } catch { /* Binance nicht erreichbar */ }
+      // Gleiches Kürzel, aber ein anderer Coin? Dann weicht der Kurs deutlich ab
+      if (data && Math.abs(data.p[data.p.length - 1] / c.current_price - 1) > 0.1) data = null;
+      d.source = data ? 'Binance' : 'CoinGecko';
+      if (!data) data = await api.chart(id, settings.currency);
+      if (current !== self) return;
       d.data = data;
-      d.ind = prepare(data.p, data.v);
+      d.ind = prepare(data.t, data.p, data.v);
     } catch (err) {
       if (current !== self) return;
       d.error = err.message;
     }
     chart(); update();
+  }
+
+  async function loadNews(c) {
+    try { d.news = analyseNews(await api.coinNews(c.name, c.symbol)); }
+    catch (err) { d.newsError = err.message; }
+    if (current === self) update();
   }
 
   function chart() {
@@ -466,17 +482,17 @@ function detailView(id) {
     </section>`;
   }
 
-  function testBox(title, bt) {
+  function testBox(bt) {
     if (!bt || bt.all.n < 30) return '';
     const line = (b, label, fall) => (b.n < 5 ? `<li><span class="muted">${label}: zu selten aufgetreten (${b.n} Tage)</span></li>`
-      : `<li><strong>${label}</strong> an ${b.n} Tagen → ${bt.days} Tage später ${fall
+      : `<li><strong>${label}</strong> an ${b.n} Tagen → ${fall
         ? `in ${num(100 - b.upRate, 0)} % der Fälle tiefer` : `in ${num(b.upRate, 0)} % der Fälle höher`}, im Schnitt ${pct(b.mean, 1)}</li>`);
     const edge = bt.buy.n >= 5 ? bt.buy.mean - bt.all.mean : null;
     const verdict = edge === null ? '' : edge > 1
-      ? '<p class="up">Nach Kaufsignalen lief dieser Coin im Rückblick besser als im Durchschnitt aller Tage.</p>'
-      : edge < -1 ? '<p class="down">Achtung: Nach Kaufsignalen lief dieser Coin im Rückblick schlechter als im Durchschnitt – hier ist das Modell wenig verlässlich.</p>'
-      : '<p class="muted">Kaufsignale brachten bei diesem Coin im Rückblick kaum einen Vorteil gegenüber dem Durchschnitt.</p>';
-    return `<div><h3>${title}</h3><ul class="plain">
+      ? '<p class="up">Kaufsignale lagen über dem Durchschnitt aller Tage.</p>'
+      : edge < -1 ? '<p class="down">Achtung: Kaufsignale lagen unter dem Durchschnitt – hier ist das Modell wenig verlässlich.</p>'
+      : '<p class="muted">Kaufsignale brachten kaum einen Vorteil gegenüber dem Durchschnitt.</p>';
+    return `<div class="panel"><h3>${bt.days} Tage später</h3><ul class="plain">
       ${line(bt.buy, 'Kaufsignal')}${line(bt.sell, 'Verkaufssignal', true)}
       <li><span class="muted">Zum Vergleich alle ${bt.all.n} Tage: in ${num(bt.all.upRate, 0)} % der Fälle höher, im Schnitt ${signed(bt.all.mean, 1)} %</span></li>
     </ul>${verdict}</div>`;
@@ -486,34 +502,54 @@ function detailView(id) {
     if (a.signal === 'none') { $('#d-forecast').innerHTML = `<section class="panel"><h2>Prognose</h2><p>${esc(a.notes[0])}</p></section>`; return; }
     const card = (title, span, h) => `<div class="panel h-card">
       <div class="panel-top"><div><h3>${title}</h3><div class="muted">${span}</div></div>
-        <span class="outlook ${tone(h.score === null || Math.abs(h.score) <= 0.15 ? 0 : h.score)}">${outlook(h.score)}</span></div>
+        <span class="outlook ${tone(h.score === null || Math.abs(h.score) <= 0.12 ? 0 : h.score)}">${outlook(h.score)}</span></div>
       ${factorList(h.factors)}</div>`;
 
     let extra = '';
     if (d.ind) {
+      // Rückblick-Test nur neu rechnen, wenn die Bitcoin-Daten für die Marktphase dazugekommen sind
+      if (!d.tests || d.testsWithRegime !== !!state.btcInd) {
+        d.testsWithRegime = !!state.btcInd;
+        d.tests = [14, 30, 90].map((days) => backtest(d.ind, state.btcInd, state.fng?.byDay, days));
+      }
       const move = expectedMove(d.data.p);
       const span = (m) => `${money(c.current_price * Math.exp(-m))} bis ${money(c.current_price * Math.exp(m))}`;
+      const years = d.ind.n / 365;
       extra = `<section class="panel"><h2>Übliche Schwankungsbreite</h2>
           <p class="hint">Abgeleitet aus den Tagesschwankungen der letzten 90 Tage. In etwa zwei von drei Fällen bleibt der Kurs in dieser Spanne – Ausreißer nach oben und unten sind jederzeit möglich.</p>
           ${move ? `<div class="stat-grid">
             <div><div class="label">In 7 Tagen</div><div class="value">± ${num(move.d7 * 100, 0)} %</div><div class="muted">${span(move.d7)}</div></div>
             <div><div class="label">In 30 Tagen</div><div class="value">± ${num(move.d30 * 100, 0)} %</div><div class="muted">${span(move.d30)}</div></div></div>` : ''}
         </section>
-        <section class="panel"><h2>Rückblick-Test: Wie gut war das Modell bei diesem Coin?</h2>
-          <p class="hint">Das Modell wurde für jeden Tag der letzten 12 Monate nur mit den damals bekannten Kursen berechnet und mit der tatsächlichen Entwicklung danach verglichen.</p>
-          <div class="two-col">${testBox('Mittelfristig (14 Tage später)', backtest(d.ind, 'medium', 14, 50))}
-            ${testBox('Langfristig (30 Tage später)', backtest(d.ind, 'long', 30, 120))}</div>
-          <p class="hint">Ein Jahr und ein einzelner Coin sind eine kleine Stichprobe. Gute Trefferquoten in der Vergangenheit garantieren keine künftigen.</p>
-        </section>`;
+        <h2>Rückblick-Test über ${years >= 1.5 ? num(years, 1) + ' Jahre' : num(d.ind.n, 0) + ' Tage'}</h2>
+        <p class="hint">Wie gut war das Modell bei diesem Coin? Es wurde für jeden Tag nur mit den damals bekannten Kursen berechnet (Datenquelle: ${d.source}) und mit der tatsächlichen Entwicklung danach verglichen. Nachrichten sind im Rückblick nicht enthalten.</p>
+        <div class="h-cards">${d.tests.map(testBox).join('') || '<p class="muted">Zu wenig Kursgeschichte für einen Rückblick-Test.</p>'}</div>
+        <p class="hint">Wichtig: Die Bewertungskurven wurden an den letzten 4 Jahren großer Coins ausgerichtet. Die Trefferquoten im Rückblick fallen deshalb eher zu gut aus und sind keine Zusage für die Zukunft.</p>`;
     } else if (d.error) extra = `<section class="panel"><p class="muted">${esc(d.error)}</p></section>`;
 
     $('#d-forecast').innerHTML = `
       <h2>Prognose nach Zeithorizont</h2>
-      <p class="hint">${d.ind ? 'Verfeinert mit den Tageskursen der letzten 365 Tage.' : 'Schnellbewertung – die verfeinerte Prognose wird geladen …'}
+      <p class="hint">${d.ind ? `Verfeinert mit ${num(d.ind.n, 0)} Tageskursen.` : 'Schnellbewertung – die verfeinerte Prognose wird geladen …'}
         Die Punkte je Faktor reichen von −100 (klar negativ) bis +100 (klar positiv).</p>
       ${a.notes.map((n) => `<p class="notice">${esc(n)}</p>`).join('')}
-      <div class="h-cards">${card('Kurzfristig', '1–7 Tage', a.short)}${card('Mittelfristig', '1–4 Wochen', a.medium)}${card('Langfristig', '3–12 Monate', a.long)}</div>
+      <div class="h-cards">${card('Kurzfristig', 'bis 1 Woche', a.short)}${card('Mittelfristig', '2–4 Wochen', a.medium)}
+        ${card('Langfristig', '1–3 Monate', a.long)}${card('Marktphase', 'gilt für alle Coins', a.regime)}</div>
       ${extra}`;
+  }
+
+  function news(a) {
+    const el = $('#d-news');
+    if (a.signal === 'none') { el.innerHTML = ''; return; }
+    const n = d.news;
+    const tag = (t) => (t > 0 ? '<span class="tag up">positiv</span>' : t < 0 ? '<span class="tag down">negativ</span>' : '<span class="tag">neutral</span>');
+    const body = !n ? `<p class="muted">${esc(d.newsError ?? 'Lade Nachrichten …')}</p>` : `
+      <p>${esc(n.text)}${n.score !== null ? ` → Einfluss auf den Score: <strong class="${tone(Math.round(n.score * 10))}">${signed(n.score * 10, 0)} Punkte</strong>` : ''}</p>
+      <ul class="news">${n.items.slice(0, 8).map((it) => `<li>${tag(it.tone)}
+        <span>${/^https?:\/\//.test(it.link) ? `<a href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title)}
+        <br><span class="muted">${esc(it.source ?? '')} · ${new Date(it.time).toLocaleDateString('de-DE')}</span></span></li>`).join('')}</ul>`;
+    el.innerHTML = `<section class="panel"><h2>Nachrichten</h2>
+      <p class="hint">Englischsprachige Meldungen der letzten 7 Tage, automatisch nach Stichwörtern als positiv oder negativ eingestuft. Die Einstufung ist grob und kann danebenliegen – deshalb verschieben Nachrichten den Score um höchstens 10 Punkte.</p>
+      ${body}</section>`;
   }
 
   function stats(c) {
@@ -536,10 +572,14 @@ function detailView(id) {
         ? 'Dieser Coin gehört aktuell nicht zu den Top 1000.' : 'Lade Kurse …'}</p></section>`;
       return;
     }
-    if (d.currency !== settings.currency) { loadChart(); chart(); }
-    else if (d.range === '7T') chart();
-    const a = d.ind ? detailAnalyse(c, d.ind, state.market?.regime ?? 0) : c.analysis;
-    head(c, a); forecast(c, a); stats(c);
+    if (!d.started) {
+      d.started = true;
+      loadData(c);
+      if (!c.analysis.stable) loadNews(c);
+      chart();
+    } else if (d.range === '7T') chart();
+    const a = d.ind ? detailAnalyse(c, d.ind, state.market?.regime ?? NO_REGIME, d.news) : c.analysis;
+    head(c, a); forecast(c, a); news(a); stats(c);
   }
 
   return self;
@@ -563,12 +603,11 @@ function portfolioView() {
     <div class="two-col">
       <section class="panel">
         <h2>Aus CoinMarketCap importieren</h2>
-        <p class="hint">Exportiere dein Portfolio bei CoinMarketCap als CSV-Datei und wähle sie hier aus. Erkannt werden Bestände und
-          Transaktionslisten mit Spalten für Coin (Name oder Kürzel), Menge und optional Kaufpreis und Typ (Kauf/Verkauf).</p>
+        <p class="hint">CoinMarketCap bietet keine Schnittstelle, über die eine andere Website dein Portfolio direkt abrufen darf.
+          Der Weg führt deshalb über eine Datei: Portfolio bei CoinMarketCap als CSV exportieren und hier auswählen. Erkannt werden
+          Bestände und Transaktionslisten mit Spalten für Coin (Name oder Kürzel), Menge und optional Kaufpreis in USD und Typ (Kauf/Verkauf).</p>
         <form id="p-import" class="form">
           <label>CSV-Datei <input type="file" id="p-file" accept=".csv,.txt,text/csv" required></label>
-          <label>Währung der Kaufpreise in der Datei
-            <select id="p-cur"><option value="usd">USD</option><option value="eur">EUR</option><option value="chf">CHF</option></select></label>
           <label class="check"><input type="checkbox" id="p-replace" checked> Bestehende Positionen ersetzen</label>
           <button class="btn" type="submit">Importieren</button>
         </form>
@@ -579,15 +618,13 @@ function portfolioView() {
           <label>Coin <input id="p-coin" list="coinlist" placeholder="z. B. Bitcoin oder BTC" required autocomplete="off"></label>
           <datalist id="coinlist"></datalist>
           <label>Menge <input id="p-amount" inputmode="decimal" placeholder="0,5" required></label>
-          <label>Kaufpreis je Coin in <span data-cur></span> (optional) <input id="p-cost" inputmode="decimal"></label>
+          <label>Kaufpreis je Coin in USD (optional) <input id="p-cost" inputmode="decimal"></label>
           <button class="btn" type="submit">Hinzufügen</button>
         </form>
       </section>
     </div>
     <p id="p-msg" class="notice" hidden></p>
     <p><button class="btn ghost" id="p-clear">Portfolio leeren</button></p>`;
-
-  api.rates().then((r) => { state.rates = r; if (current === self) update(); }).catch(() => {});
 
   const say = (text) => { message = text; update(); };
   const find = (pos) => (pos.id && state.byId.get(pos.id))
@@ -599,7 +636,7 @@ function portfolioView() {
     const file = $('#p-file').files[0];
     if (!file) return;
     try {
-      const res = pf.parseImport(await file.text(), $('#p-cur').value);
+      const res = pf.parseImport(await file.text(), 'usd');
       if (!res.positions.length) throw new Error('In der Datei wurden keine Bestände gefunden.');
       list = $('#p-replace').checked ? res.positions : res.positions.reduce(pf.add, list);
       pf.save(list);
@@ -618,7 +655,7 @@ function portfolioView() {
     const cost = pf.parseNumber($('#p-cost').value);
     if (!c) return say(`„${text}“ wurde unter den geladenen Coins nicht gefunden.`);
     if (!(amount > 0)) return say('Bitte eine Menge größer als 0 eingeben.');
-    list = pf.add(list, { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: settings.currency });
+    list = pf.add(list, { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd' });
     pf.save(list);
     e.target.reset();
     say(`${c.name} hinzugefügt.`);
@@ -638,8 +675,6 @@ function portfolioView() {
   let optionCount = -1;
 
   function update() {
-    const cur = settings.currency;
-    view.querySelectorAll('[data-cur]').forEach((el) => { el.textContent = cur.toUpperCase(); });
     $('#p-msg').hidden = !message; $('#p-msg').textContent = message;
     $('#p-clear').hidden = !list.length;
     if (optionCount !== state.coins.length) {
@@ -647,14 +682,10 @@ function portfolioView() {
       $('#coinlist').innerHTML = state.coins.map((c) => `<option value="${esc(c.name)} (${esc(c.symbol.toUpperCase())})">`).join('');
     }
 
-    // Kaufpreise in die Anzeigewährung umrechnen (zum heutigen Wechselkurs)
-    const convert = (cost, from) => (!isNum(cost) ? null : from === cur ? cost
-      : state.rates?.[cur] && state.rates?.[from] ? cost * state.rates[cur] / state.rates[from] : null);
-
     const rows = list.map((pos) => {
       const c = find(pos);
       const value = c ? pos.amount * c.current_price : null;
-      const unit = convert(pos.cost, pos.costCur);
+      const unit = isNum(pos.cost) ? pos.cost : null;
       const paid = unit === null ? null : unit * pos.amount;
       return { pos, c, value, unit, paid, gain: value !== null && paid !== null ? value - paid : null };
     }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
@@ -744,12 +775,9 @@ function route() {
   window.scrollTo(0, 0);
 }
 
-$('#currency').addEventListener('click', (e) => {
-  const c = e.target.closest('[data-currency]')?.dataset.currency;
-  if (c) setCurrency(c);
-});
-
 window.addEventListener('hashchange', route);
 route();
 marketLoop();
 fngLoop();
+loadBitcoin();
+loadMarketNews();

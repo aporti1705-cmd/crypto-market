@@ -75,7 +75,7 @@ nav a.active { background: var(--panel-2); color: var(--text); }
 .notice { background: var(--hold-bg); border-left: 3px solid var(--hold); border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 14px; }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
-main > #view > section.panel, #d-forecast > section.panel, #d-stats > section.panel, #d-head > section.panel { margin-top: 16px; }
+main > #view > section.panel, #d-forecast > section.panel, #d-stats > section.panel, #d-news > section.panel, #d-head > section.panel { margin-top: 16px; }
 .panel-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
 
 /* Marktüberblick */
@@ -161,6 +161,14 @@ tbody tr.coin:hover { background: var(--panel-2); }
 .factors li { display: flex; gap: 12px; align-items: baseline; font-size: 14px; }
 .pts { flex: 0 0 40px; text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
 .plain li { font-size: 14px; }
+
+/* Nachrichten */
+.news { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 10px; }
+.news li { display: flex; gap: 12px; align-items: baseline; font-size: 14px; }
+.news a:hover { text-decoration: underline; }
+.tag { flex: 0 0 62px; text-align: center; font-size: 12px; font-weight: 600; padding: 2px 0; border-radius: 6px; background: var(--panel-2); color: var(--muted); }
+.tag.up { background: var(--up-bg); color: var(--up); }
+.tag.down { background: var(--down-bg); color: var(--down); }
 
 /* Detailansicht */
 .back { display: inline-block; margin-top: 18px; color: var(--muted); }

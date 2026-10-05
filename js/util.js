@@ -1,4 +1,4 @@
-export const settings = { currency: 'eur' };
+export const settings = { currency: 'usd' };
 
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

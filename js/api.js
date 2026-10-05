@@ -54,15 +54,70 @@ export async function chart(id, currency) {
   return data;
 }
 
-// Bitcoin-Preis in mehreren Währungen – daraus ergeben sich die Wechselkurse
-export async function rates() {
-  const raw = await cg('/simple/price?ids=bitcoin&vs_currencies=usd,eur,chf');
-  return raw.bitcoin;
+// Tageskurse der letzten 4 Jahre von Binance (Paar gegen USDT). Gibt null zurück, wenn der Coin dort nicht gehandelt wird.
+const DAYS_4Y = 1461;
+const histories = new Map();
+
+export async function history(symbol) {
+  const pair = symbol.toUpperCase() + 'USDT';
+  if (histories.has(pair)) return histories.get(pair);
+  let rows = [], end = Date.now();
+  for (let k = 0; k < 2 && rows.length < DAYS_4Y; k++) {
+    const res = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(pair)}&interval=1d&limit=1000&endTime=${end}`);
+    if (!res.ok) { rows = null; break; }
+    const part = await res.json();
+    if (!part.length) break;
+    rows = part.concat(rows);
+    end = part[0][0] - 1;
+    if (part.length < 1000) break;
+  }
+  const data = rows && rows.length >= 60 ? (() => {
+    const cut = rows.slice(-DAYS_4Y);
+    // Spalten: 0 = Tagesbeginn, 4 = Schlusskurs, 7 = Handelsvolumen in USDT
+    return { t: cut.map((r) => r[0]), p: cut.map((r) => Number(r[4])), v: cut.map((r) => Number(r[7])) };
+  })() : null;
+  histories.set(pair, data);
+  return data;
 }
 
+// Aktueller Fear & Greed Index samt Verlauf (für den Rückblick-Test)
 export async function fearGreed() {
-  const res = await fetch('https://api.alternative.me/fng/?limit=30');
+  const res = await fetch('https://api.alternative.me/fng/?limit=1500');
   if (!res.ok) throw new Error('Fear & Greed Index nicht erreichbar.');
   const json = await res.json();
   return json.data.map((d) => ({ value: Number(d.value), time: Number(d.timestamp) * 1000 }));
+}
+
+// ---------- Nachrichten (cryptocurrency.cv, kostenlos, begrenzt auf wenige Suchen pro Stunde) ----------
+
+const NEWS = 'https://cryptocurrency.cv/api';
+const NEWS_TTL_MS = 30 * 60_000;
+const NO_NEWS = /etherscan|tradingview|stacker|nostr|blockchain.com/i;   // Quellen ohne redaktionelle Meldungen
+
+async function newsRequest(path) {
+  const key = 'krypto-markt-news:' + path;
+  try {
+    const hit = JSON.parse(sessionStorage.getItem(key));
+    if (hit && Date.now() - hit.time < NEWS_TTL_MS) return hit.items;
+  } catch {}
+  const res = await fetch(NEWS + path);
+  if (!res.ok) throw new Error(res.status === 429 ? 'Nachrichten-Limit erreicht, bitte später erneut versuchen.' : 'Nachrichten nicht erreichbar.');
+  const json = await res.json();
+  const items = (json.articles || [])
+    .filter((a) => a.title && a.link && !NO_NEWS.test(`${a.source} ${a.link}`))
+    .map((a) => ({ title: a.title, description: (a.description || '').slice(0, 300), link: a.link, source: a.source, time: Date.parse(a.pubDate) }))
+    .filter((a) => Number.isFinite(a.time));
+  try { sessionStorage.setItem(key, JSON.stringify({ time: Date.now(), items })); } catch {}
+  return items;
+}
+
+// Die allgemeine Liste liefert kostenlos nur 3 Meldungen, die Suche bis zu 30
+export const marketNews = () => newsRequest('/search?q=crypto&limit=30');
+
+// Meldungen zu einem Coin; behalten wird nur, was Name oder Kürzel wirklich nennt
+export async function coinNews(name, symbol) {
+  const items = await newsRequest(`/search?q=${encodeURIComponent(name)}&limit=30`);
+  const escape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`\\b(${escape(name)}${symbol.length >= 3 ? '|' + escape(symbol) : ''})\\b`, 'i');
+  return items.filter((a) => pattern.test(`${a.title} ${a.description}`));
 }

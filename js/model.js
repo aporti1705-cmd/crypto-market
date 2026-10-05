@@ -1,21 +1,63 @@
-// Prognosemodell
+// Prognosemodell (Version 2)
 //
-// Jeder Coin wird auf drei Zeithorizonten bewertet (kurz: Tage, mittel: Wochen, lang: Monate).
-// Jeder Horizont besteht aus gewichteten Faktoren mit Werten von -1 (negativ) bis +1 (positiv).
-// Grundlage sind die am besten belegten Effekte am Kryptomarkt: Trendfolge und Momentum über
-// Wochen bis Monate, Überdehnung (RSI) als Gegensignal an den Extremen und die Marktphase,
-// weil Altcoins stark mit dem Gesamtmarkt laufen.
+// Die Bewertungskurven unten stammen aus einer Auswertung von 4 Jahren Tageskursen (Okt. 2022 – Okt. 2026)
+// von 38 großen Coins: Für jeden Indikator wurde gemessen, wie sich der Kurs 7, 14, 30 und 90 Tage später
+// entwickelt hat. Die wichtigsten Ergebnisse:
+//   1. Die Marktphase (Bitcoin) erklärt am meisten: Ist Bitcoin stark, steigen die meisten Coins mit.
+//   2. Überdehnung ist langfristig negativ: Coins weit über ihrem 200-Tage-Schnitt fielen danach meist.
+//      Am besten liefen frühe, noch nicht überhitzte Aufwärtstrends.
+//   3. Nach einem Ausverkauf (RSI unter 30, mehr als 20 % Wochenverlust) folgte kurzfristig oft eine Erholung.
+//   4. Momentum über 2–4 Wochen und steigendes Handelsvolumen helfen mittelfristig.
+// Jeder Faktor liefert einen Wert von -1 (negativ) bis +1 (positiv). Vier Jahre sind nur ein Marktzyklus –
+// die Kurven beschreiben, was in dieser Zeit funktioniert hat, und sind keine Garantie für die Zukunft.
 
 import { clamp, avg, isNum, num, signed } from './util.js';
 
-const W_SHORT = 0.3, W_MEDIUM = 0.4, W_LONG = 0.3;
-const W_REGIME = 0.15;          // Einfluss der Marktphase auf Altcoins
-const BUY = 15, STRONG = 35;    // Schwellen des Gesamt-Scores (-100 … +100)
+const W_SHORT = 0.2, W_MEDIUM = 0.25, W_LONG = 0.2, W_REGIME = 0.35;
+const W_NEWS = 0.1;             // Nachrichten verschieben den Score um höchstens ±10 Punkte
+const BUY = 12, STRONG = 28;    // Schwellen des Gesamt-Scores (-100 … +100)
 const HORIZON_MIN = 0.1;
 
-// Positive und negative Veränderungen getrennt skalieren (ein Kurs kann höchstens 100 % fallen)
-const scale = (x, up, down) => (!isNum(x) ? null : x >= 0 ? Math.min(1, x / up) : Math.max(-1, x / down));
 const factor = (name, text, score, weight) => ({ name, text, score, weight });
+
+// Stückweise lineare Kurve durch Stützpunkte [x, y]
+function curve(x, pts) {
+  if (!isNum(x)) return null;
+  if (x <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    if (x <= pts[i][0]) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+    }
+  }
+  return pts[pts.length - 1][1];
+}
+
+// Bewertungskurven: [Indikatorwert, Bewertung]
+const C = {
+  // kurzfristig (Kurs 7 Tage später)
+  rsiRebound: [[20, 1], [30, 0.7], [38, 0], [100, 0]],
+  ret7: [[-25, 0.9], [-15, 0.3], [-8, 0], [10, 0], [25, 0.4], [45, 0.6]],
+  sma20: [[-25, 0.9], [-15, 0.3], [-8, -0.1], [0, -0.1], [10, 0.2], [25, 0.5], [40, 0.8]],
+  // mittelfristig (14–30 Tage später)
+  rsiMomentum: [[20, 0.4], [30, 0.3], [38, 0], [45, -0.2], [55, -0.1], [62, 0.5], [75, 0.8], [90, 0.6]],
+  sma50: [[-35, -0.2], [-20, -0.3], [-5, 0], [5, 0], [15, 0.3], [25, 0.7], [40, 0.4], [60, 0]],
+  ret30: [[-35, -0.6], [-20, -0.3], [-5, 0], [5, 0.2], [20, 0.6], [45, 0.3], [70, -0.3]],
+  ret14: [[-30, -0.4], [-15, -0.3], [-4, 0], [4, 0.1], [18, 0.5], [35, 0.5], [60, 0.1]],
+  // langfristig (30–90 Tage später)
+  sma200: [[-50, -0.2], [-30, 0], [-12, -0.1], [0, 0.6], [12, 0.6], [30, 0.2], [45, -0.6], [80, -0.9]],
+  cross: [[-40, -0.3], [-22, 0.3], [-10, 0.2], [0, 0.7], [10, 0.2], [22, -0.5], [45, -1]],
+  ret90: [[-60, -0.2], [-40, -0.4], [-20, 0.3], [0, 0.5], [20, 0.1], [45, -0.2], [90, -0.6], [150, -1]],
+  high: [[-90, -0.7], [-75, -0.3], [-55, 0.2], [-35, 0.1], [-20, -0.2], [-5, 0.3]],
+  ret200: [[-70, 0.1], [-50, 0.4], [-25, 0.3], [0, 0.1], [50, 0], [100, -0.5], [200, -0.8]],
+  ret365: [[-80, -0.6], [-60, -0.3], [-35, 0], [-10, 0.5], [25, 0.5], [75, 0.1], [150, -0.2], [300, -0.7]],
+  // Marktphase (Bitcoin)
+  btcRsi: [[25, -0.8], [35, -0.6], [45, -0.2], [60, 0], [68, 0.6], [78, 1]],
+  btcRet30: [[-20, -0.8], [-10, -0.7], [-3, -0.3], [0, 0.2], [8, 0.3], [15, 0.1], [22, 0.9], [35, 1]],
+  btcSma50: [[-15, -0.8], [-8, -0.5], [-3, -0.1], [5, 0], [10, 0.6], [18, 1]],
+  btcSma200: [[-25, 0], [-15, -0.6], [-5, 0.8], [5, 0.6], [15, 0.1], [35, 0], [50, -0.6], [60, -1]],
+  fng: [[20, 0], [50, 0], [62, 0.4], [72, 0], [80, -0.6], [90, -1]],
+};
 
 function combine(factors) {
   let s = 0, w = 0;
@@ -28,6 +70,9 @@ const horizon = (factors) => {
   return { score: combine(valid), factors: valid };
 };
 
+const side = (x) => `${num(Math.abs(x))} % ${x >= 0 ? 'über' : 'unter'}`;
+const verdict = (s, good, bad, neutral = 'neutral') => (s > 0.15 ? good : s < -0.15 ? bad : neutral);
+
 // ---------- Indikatoren ----------
 
 function rolling(a, w) {
@@ -38,12 +83,6 @@ function rolling(a, w) {
     if (i >= w) s -= a[i - w];
     if (i >= w - 1) out[i] = s / w;
   }
-  return out;
-}
-
-function ema(a, w) {
-  const k = 2 / (w + 1), out = [a[0]];
-  for (let i = 1; i < a.length; i++) out[i] = a[i] * k + out[i - 1] * (1 - k);
   return out;
 }
 
@@ -78,124 +117,92 @@ const logReturns = (p) => p.slice(1).map((x, i) => Math.log(x / p[i]));
 
 // Alle Tagesindikatoren einmal berechnen. Jeder Wert an Stelle i nutzt nur Daten bis i,
 // damit der Rückblick-Test nicht in die Zukunft schaut.
-export function prepare(prices, volumes) {
-  const fast = ema(prices, 12), slow = ema(prices, 26);
-  const macd = prices.map((_, i) => fast[i] - slow[i]);
-  const signal = ema(macd, 9);
+export function prepare(times, prices, volumes) {
   return {
-    n: prices.length, prices,
+    n: prices.length, times, prices,
+    days: times.map((t) => Math.floor(t / 86_400_000)),
     sma20: rolling(prices, 20), sma50: rolling(prices, 50), sma200: rolling(prices, 200),
-    hist: macd.map((m, i) => (i >= 34 ? m - signal[i] : null)),
     rsi: rsiSeries(prices),
     vol20: rolling(volumes, 20), vol90: rolling(volumes, 90),
   };
 }
 
+const retAt = (ind, i, d) => (i >= d ? (ind.prices[i] / ind.prices[i - d] - 1) * 100 : null);
+const relAt = (ind, i, key) => (ind[key][i] ? (ind.prices[i] / ind[key][i] - 1) * 100 : null);
+
 // ---------- Horizonte auf Tagesdaten (Detailansicht und Rückblick-Test) ----------
 
 export function scoreAt(ind, i) {
-  const p = ind.prices[i];
-  const ret = (d) => (i >= d ? (p / ind.prices[i - d] - 1) * 100 : null);
-  const rel = (base) => (base ? (p / base - 1) * 100 : null);
-  const side = (x) => (x >= 0 ? 'über' : 'unter');
+  const r = ind.rsi[i];
+  const s20 = relAt(ind, i, 'sma20'), s50 = relAt(ind, i, 'sma50'), s200 = relAt(ind, i, 'sma200');
+  const m7 = retAt(ind, i, 7), m14 = retAt(ind, i, 14), m30 = retAt(ind, i, 30), m90 = retAt(ind, i, 90);
+  const add = (list, name, value, text, pts, weight) => {
+    const score = curve(value, pts);
+    if (score !== null) list.push(factor(name, text(score), score, weight));
+  };
+
+  const short = [];
+  add(short, 'RSI (14 Tage)', r, (s) => `${num(r, 0)} – ${s > 0.15 ? 'überverkauft, Erholung wahrscheinlicher' : 'kein Ausverkauf'}`, C.rsiRebound, 0.35);
+  add(short, 'Veränderung 7 Tage', m7, (s) => `${signed(m7)} % – ${m7 < -8 ? verdict(s, 'Ausverkauf, oft folgt eine Gegenbewegung', '', 'Schwäche') : verdict(s, 'starker Schwung', '', 'unauffällig')}`, C.ret7, 0.3);
+  add(short, 'Kurs zum 20-Tage-Schnitt', s20, () => `${side(s20)} dem 20-Tage-Schnitt`, C.sma20, 0.35);
 
   const medium = [];
-  const s20 = rel(ind.sma20[i]), s50 = rel(ind.sma50[i]);
-  if (s20 !== null) medium.push(factor('Kurs zum 20-Tage-Schnitt', `${num(Math.abs(s20))} % ${side(s20)} dem 20-Tage-Schnitt`, scale(s20, 10, 10), 0.2));
-  if (s50 !== null) medium.push(factor('Kurs zum 50-Tage-Schnitt', `${num(Math.abs(s50))} % ${side(s50)} dem 50-Tage-Schnitt`, scale(s50, 20, 20), 0.2));
-
-  const h = ind.hist[i], hPrev = ind.hist[i - 1];
-  if (h != null && hPrev != null) {
-    const rising = h > hPrev;
-    const score = h > 0 ? (rising ? 1 : 0.3) : (rising ? -0.3 : -1);
-    const text = h > 0
-      ? (rising ? 'Aufwärtsschwung nimmt zu' : 'Aufwärtsschwung lässt nach')
-      : (rising ? 'Abwärtsschwung lässt nach' : 'Abwärtsschwung nimmt zu');
-    medium.push(factor('MACD', text, score, 0.2));
-  }
-
-  const r = ind.rsi[i];
-  if (r !== null) {
-    let score, text;
-    if (r > 80) [score, text] = [-1, 'stark überkauft – Rücksetzer wahrscheinlicher'];
-    else if (r > 70) [score, text] = [-0.5, 'überkauft'];
-    else if (r < 20) [score, text] = [1, 'stark überverkauft – Erholung wahrscheinlicher'];
-    else if (r < 30) [score, text] = [0.5, 'überverkauft'];
-    else [score, text] = [(r - 50) / 50 * 0.4, r >= 50 ? 'Käufer leicht im Vorteil' : 'Verkäufer leicht im Vorteil'];
-    medium.push(factor('RSI (14 Tage)', `${num(r, 0)} – ${text}`, score, 0.15));
-  }
-
-  const m30 = ret(30);
-  if (m30 !== null) medium.push(factor('Momentum 30 Tage', `${signed(m30)} % in 30 Tagen`, scale(m30, 50, 30), 0.25));
-
-  const v20 = ind.vol20[i], v90 = ind.vol90[i], m7 = ret(7);
-  if (v20 && v90 && m7 !== null && v20 / v90 > 1.3 && Math.abs(m7) > 3) {
-    medium.push(factor('Handelsvolumen', `Volumen ${num((v20 / v90 - 1) * 100, 0)} % über Normal bestätigt die ${m7 > 0 ? 'Aufwärts' : 'Abwärts'}bewegung`, m7 > 0 ? 0.7 : -0.7, 0.1));
+  add(medium, 'RSI-Momentum', r, (s) => `${num(r, 0)} – ${verdict(s, r < 40 ? 'überverkauft' : 'Käufer klar im Vorteil', 'kein Schwung', 'neutral')}`, C.rsiMomentum, 0.2);
+  add(medium, 'Kurs zum 50-Tage-Schnitt', s50, () => `${side(s50)} dem 50-Tage-Schnitt`, C.sma50, 0.2);
+  add(medium, 'Momentum 30 Tage', m30, (s) => `${signed(m30)} % – ${m30 > 55 ? 'überhitzt' : verdict(s, 'gesunder Aufwärtstrend', 'Abwärtstrend', 'unauffällig')}`, C.ret30, 0.25);
+  add(medium, 'Momentum 14 Tage', m14, () => `${signed(m14)} %`, C.ret14, 0.15);
+  const v20 = ind.vol20[i], v90 = ind.vol90[i];
+  if (v20 && v90 && m7 !== null && v20 / v90 >= 1.3 && Math.abs(m7) > 3) {
+    medium.push(factor('Handelsvolumen', `${num((v20 / v90 - 1) * 100, 0)} % über Normal bei ${m7 > 0 ? 'steigendem' : 'fallendem'} Kurs`, m7 > 0 ? 0.8 : -0.5, 0.2));
   }
 
   const long = [];
-  const s200 = rel(ind.sma200[i]);
-  if (s200 !== null) long.push(factor('Kurs zum 200-Tage-Schnitt', `${num(Math.abs(s200))} % ${side(s200)} dem 200-Tage-Schnitt`, scale(s200, 40, 30), 0.3));
+  add(long, 'Kurs zum 200-Tage-Schnitt', s200, (s) => `${side(s200)} dem 200-Tage-Schnitt – ${s200 > 40 ? 'überdehnt' : verdict(s, 'früher Aufwärtstrend', 'schwach')}`, C.sma200, 0.3);
   if (ind.sma50[i] && ind.sma200[i]) {
-    const cross = (ind.sma50[i] / ind.sma200[i] - 1) * 100;
-    long.push(factor('50- zum 200-Tage-Schnitt', cross >= 0 ? `Golden Cross: 50-Tage-Schnitt ${num(cross)} % darüber` : `Death Cross: 50-Tage-Schnitt ${num(-cross)} % darunter`, scale(cross, 20, 20), 0.25));
+    const x = (ind.sma50[i] / ind.sma200[i] - 1) * 100;
+    add(long, '50- zum 200-Tage-Schnitt', x, (s) => `50-Tage-Schnitt ${side(x)} dem 200-Tage-Schnitt – ${x > 18 ? 'Trend weit fortgeschritten' : verdict(s, 'Trendwende oder junger Trend', 'schwach')}`, C.cross, 0.3);
   }
-  const m90 = ret(90);
-  if (m90 !== null) long.push(factor('Momentum 90 Tage', `${signed(m90)} % in 90 Tagen`, scale(m90, 80, 45), 0.25));
+  add(long, 'Momentum 90 Tage', m90, (s) => `${signed(m90)} % – ${m90 > 45 ? 'stark gelaufen, Rückschlaggefahr' : verdict(s, 'Raum nach oben', m90 > 0 ? 'schon weit gelaufen' : 'anhaltende Schwäche')}`, C.ret90, 0.25);
   if (i >= 120) {
     let high = 0;
     for (let k = Math.max(0, i - 364); k <= i; k++) high = Math.max(high, ind.prices[k]);
-    long.push(highFactor((p / high - 1) * 100, 'Jahreshoch', 0.2));
+    const dist = (ind.prices[i] / high - 1) * 100;
+    add(long, 'Abstand zum Jahreshoch', dist, () => `${num(-dist, 0)} % unter dem Jahreshoch`, C.high, 0.15);
   }
 
-  return { medium: horizon(medium), long: horizon(long) };
+  return { short: horizon(short), medium: horizon(medium), long: horizon(long) };
 }
 
-// Nähe zum Hoch gilt als Stärke, ein sehr großer Abstand als Warnzeichen
-function highFactor(dist, label, weight) {
-  if (!isNum(dist)) return null;
-  const score = dist > -15 ? 0.5 : dist > -60 ? 0 : dist > -85 ? -0.4 : -0.8;
-  return factor(`Abstand zum ${label}`, `${num(-dist, 0)} % unter dem ${label}`, score, weight);
+// ---------- Marktphase ----------
+
+// Bewertung der Marktphase aus den Bitcoin-Tageskursen an Stelle j, optional mit Fear & Greed
+export function regimeAt(btc, j, fng) {
+  const f = [];
+  const r = btc.rsi[j], m30 = retAt(btc, j, 30), s50 = relAt(btc, j, 'sma50'), s200 = relAt(btc, j, 'sma200');
+  const add = (name, value, text, pts, weight) => {
+    const score = curve(value, pts);
+    if (score !== null) f.push(factor(name, text(score), score, weight));
+  };
+  add('Bitcoin RSI (14 Tage)', r, (s) => `${num(r, 0)} – ${verdict(s, 'starker Markt', 'schwacher Markt')}`, C.btcRsi, 0.3);
+  add('Bitcoin Momentum 30 Tage', m30, (s) => `${signed(m30)} % – ${verdict(s, 'Rückenwind', 'Gegenwind')}`, C.btcRet30, 0.25);
+  add('Bitcoin zum 50-Tage-Schnitt', s50, () => `${side(s50)} dem 50-Tage-Schnitt`, C.btcSma50, 0.2);
+  add('Bitcoin zum 200-Tage-Schnitt', s200, (s) => `${side(s200)} dem 200-Tage-Schnitt – ${s200 > 45 ? 'Markt überhitzt' : verdict(s, 'günstige Zyklusphase', 'ungünstige Zyklusphase')}`, C.btcSma200, 0.15);
+  if (isNum(fng)) {
+    add('Fear & Greed', fng, (s) => `${fng} – ${fng >= 78 ? 'extreme Gier, historisch ein Warnzeichen' : verdict(s, 'Zuversicht ohne Übertreibung', 'Gier')}`, C.fng, 0.1);
+  }
+  return horizon(f);
+}
+
+// Ersatz, falls keine Bitcoin-Tageskurse geladen werden konnten
+function regimeFromMarket(btc) {
+  const d30 = btc?.price_change_percentage_30d_in_currency;
+  const score = curve(d30, C.btcRet30);
+  return horizon(score === null ? [] : [factor('Bitcoin Momentum 30 Tage', `${signed(d30)} %`, score, 1)]);
 }
 
 // ---------- Schnellbewertung aus den Marktdaten (Liste mit 1000 Coins) ----------
 
-function shortTerm(prices, h24) {
-  if (prices.length < 60) return horizon([]);
-  const f = [];
-
-  const trend = (avg(prices.slice(-24)) / avg(prices) - 1) * 100;
-  f.push(factor('Trend', `24-Stunden-Schnitt ${num(Math.abs(trend))} % ${trend >= 0 ? 'über' : 'unter'} dem 7-Tage-Schnitt`, scale(trend, 5, 5), 0.35));
-
-  // Kursbewegung der letzten 3 Tage im Verhältnis zur üblichen Schwankung
-  const recent = prices.slice(-72);
-  const move = Math.log(recent[recent.length - 1] / recent[0]);
-  const sd = stdev(logReturns(prices));
-  if (sd > 0) {
-    const z = move / (sd * Math.sqrt(recent.length - 1));
-    const strength = Math.abs(z) > 1.5 ? 'deutliche' : Math.abs(z) > 0.6 ? 'moderate' : 'geringe';
-    f.push(factor('Richtung 3 Tage', `${signed(move * 100)} % in 3 Tagen – ${strength} Bewegung`, clamp(z / 1.5), 0.25));
-  }
-
-  // Stundenkurse auf 4 Stunden ausdünnen, damit der RSI weniger rauscht
-  const fourHour = prices.filter((_, i) => (prices.length - 1 - i) % 4 === 0);
-  const r = rsiSeries(fourHour).at(-1);
-  if (r !== null && r !== undefined) {
-    let score, text;
-    if (r < 25) [score, text] = [1, 'stark überverkauft'];
-    else if (r < 35) [score, text] = [0.5, 'überverkauft'];
-    else if (r > 75) [score, text] = [-1, 'stark überkauft'];
-    else if (r > 65) [score, text] = [-0.5, 'überkauft'];
-    else [score, text] = [0, 'neutral'];
-    f.push(factor('RSI (4 Stunden)', `${num(r, 0)} – ${text}`, score, 0.25));
-  }
-
-  if (isNum(h24)) f.push(factor('Veränderung 24 Stunden', `${signed(h24)} %`, scale(h24, 10, 8), 0.15));
-  return horizon(f);
-}
-
 const changes = (c) => ({
-  h24: c.price_change_percentage_24h_in_currency ?? c.price_change_percentage_24h,
   d7: c.price_change_percentage_7d_in_currency,
   d14: c.price_change_percentage_14d_in_currency,
   d30: c.price_change_percentage_30d_in_currency,
@@ -214,8 +221,8 @@ export function isStable(c) {
 
 function none(label, text, stable = false) {
   const empty = horizon([]);
-  return { signal: 'none', label, score: null, stable, short: empty, medium: empty, long: empty,
-    horizon: '–', risk: { level: 0, label: '–', vol: null }, agreement: null, notes: [text] };
+  return { signal: 'none', label, score: null, stable, short: empty, medium: empty, long: empty, regime: empty,
+    news: null, horizon: '–', risk: { level: 0, label: '–', vol: null }, agreement: null, notes: [text] };
 }
 
 function riskOf(c, volDaily) {
@@ -225,134 +232,170 @@ function riskOf(c, volDaily) {
   return { level, label: ['Niedrig', 'Mittel', 'Hoch', 'Sehr hoch'][level], vol: volDaily };
 }
 
-export const outlook = (s) => (s === null ? 'Keine Daten' : s > 0.5 ? 'Sehr positiv' : s > 0.15 ? 'Positiv'
-  : s < -0.5 ? 'Sehr negativ' : s < -0.15 ? 'Negativ' : 'Neutral');
+export const outlook = (s) => (s === null ? 'Keine Daten' : s > 0.4 ? 'Sehr positiv' : s > 0.12 ? 'Positiv'
+  : s < -0.4 ? 'Sehr negativ' : s < -0.12 ? 'Negativ' : 'Neutral');
 
-function assemble(c, short, medium, long, regime, volDaily) {
-  const parts = [[short, W_SHORT], [medium, W_MEDIUM], [long, W_LONG]].filter(([h]) => h.score !== null);
-  if (!parts.length) return none('Keine Daten', 'Zu wenig Kursdaten für eine Prognose.');
+// Gesamt-Score aus den drei Horizonten und der Marktphase, als Wert von -1 bis +1
+export function totalScore(short, medium, long, regime) {
+  const parts = [[short, W_SHORT], [medium, W_MEDIUM], [long, W_LONG], [regime, W_REGIME]]
+    .filter(([h]) => h && h.score !== null);
+  // Ohne eigene Kursdaten des Coins gibt es keine Prognose
+  if (!parts.some(([h]) => h !== regime)) return null;
+  return parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+}
 
-  let raw = parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+export const signalOf = (score) => (score >= STRONG ? ['buy', 'Kaufen'] : score >= BUY ? ['buy', 'Eher kaufen']
+  : score <= -STRONG ? ['sell', 'Verkaufen'] : score <= -BUY ? ['sell', 'Eher verkaufen'] : ['hold', 'Halten']);
+
+function assemble(c, short, medium, long, regime, volDaily, news) {
+  let raw = totalScore(short, medium, long, regime);
+  if (raw === null) return none('Keine Daten', 'Zu wenig Kursdaten für eine Prognose.');
   const notes = [];
-  if (c.id !== 'bitcoin' && regime) {
-    raw += W_REGIME * regime;
-    if (Math.abs(regime) > 0.2) notes.push(`Die Marktphase ${regime > 0 ? 'stützt' : 'belastet'} die Bewertung (${signed(W_REGIME * regime * 100, 0)} Punkte).`);
-  }
+  if (news && news.score !== null) raw += W_NEWS * news.score;
   const score = Math.round(clamp(raw) * 100);
-
-  let signal, label;
-  if (score >= STRONG) [signal, label] = ['buy', 'Kaufen'];
-  else if (score >= BUY) [signal, label] = ['buy', 'Eher kaufen'];
-  else if (score <= -STRONG) [signal, label] = ['sell', 'Verkaufen'];
-  else if (score <= -BUY) [signal, label] = ['sell', 'Eher verkaufen'];
-  else [signal, label] = ['hold', 'Halten'];
+  let [signal, label] = signalOf(score);
 
   const turnover = c.market_cap ? c.total_volume / c.market_cap : 0;
   if (signal === 'buy' && (turnover < 0.003 || c.total_volume < 50_000)) {
     [signal, label] = ['hold', 'Halten'];
     notes.push('Sehr geringes Handelsvolumen – das Kaufsignal wurde auf „Halten“ begrenzt, weil sich der Coin schwer handeln lässt.');
   }
+  if (regime.score !== null && Math.abs(regime.score) > 0.25) {
+    notes.push(`Die Marktphase ${regime.score > 0 ? 'stützt' : 'belastet'} die Bewertung deutlich (${signed(regime.score * W_REGIME * 100, 0)} Punkte).`);
+  }
 
   // Empfohlene Haltedauer: der längste Horizont, der das Signal trägt
   const pos = (h) => h.score !== null && h.score > HORIZON_MIN;
   const neg = (h) => h.score !== null && h.score < -HORIZON_MIN;
   let hold = '–';
-  if (signal === 'buy') {
-    hold = pos(long) && !neg(medium) ? '3–12 Monate' : pos(medium) ? '1–4 Wochen' : pos(short) ? '1–7 Tage' : '3–12 Monate';
-  } else if (signal === 'hold') hold = 'Abwarten';
+  if (signal === 'buy') hold = pos(long) && !neg(medium) ? '1–3 Monate' : pos(medium) ? '2–4 Wochen' : pos(short) ? 'bis 1 Woche' : '2–4 Wochen';
+  else if (signal === 'hold') hold = 'Abwarten';
 
+  const own = [short, medium, long].filter((h) => h.score !== null);
   const dir = Math.sign(score);
-  const agreeing = parts.filter(([h]) => Math.abs(h.score) > HORIZON_MIN && Math.sign(h.score) === dir).length;
-  return { signal, label, score, stable: false, short, medium, long, horizon: hold,
-    risk: riskOf(c, volDaily), agreement: { agreeing, of: parts.length }, notes };
+  const agreeing = own.filter((h) => Math.abs(h.score) > HORIZON_MIN && Math.sign(h.score) === dir).length;
+  return { signal, label, score, stable: false, short, medium, long, regime, news: news ?? null, horizon: hold,
+    risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes };
 }
 
-export function quickAnalyse(c, regime = 0) {
+export function quickAnalyse(c, regime) {
   if (isStable(c)) return none('Stablecoin', 'Der Kurs ist an einen festen Wert gebunden – keine Prognose nötig.', true);
   const prices = sparkline(c);
   const ch = changes(c);
+  const f = (name, value, pts, weight, text) => {
+    const score = curve(value, pts);
+    return score === null ? null : factor(name, text ?? `${signed(value)} %`, score, weight);
+  };
 
+  // Stundenkurse auf 4 Stunden ausdünnen, damit der RSI weniger rauscht
+  const fourHour = prices.filter((_, i) => (prices.length - 1 - i) % 4 === 0);
+  const r = prices.length >= 60 ? rsiSeries(fourHour).at(-1) : null;
+  const short = [
+    f('Veränderung 7 Tage', ch.d7, C.ret7, 0.5),
+    isNum(r) ? factor('RSI (4 Stunden)', `${num(r, 0)} – ${r < 30 ? 'überverkauft' : 'kein Ausverkauf'}`, curve(r, C.rsiRebound), 0.5) : null,
+  ];
   const medium = [
-    isNum(ch.d7) && factor('Momentum 7 Tage', `${signed(ch.d7)} %`, scale(ch.d7, 20, 15), 0.3),
-    isNum(ch.d14) && factor('Momentum 14 Tage', `${signed(ch.d14)} %`, scale(ch.d14, 30, 22), 0.3),
-    isNum(ch.d30) && factor('Momentum 30 Tage', `${signed(ch.d30)} %`, scale(ch.d30, 50, 30), 0.3),
-    isNum(ch.d7) && ch.d7 > 70 && factor('Überhitzung', `${signed(ch.d7, 0)} % in einer Woche – Rückschlaggefahr`, -1, 0.2),
+    f('Momentum 30 Tage', ch.d30, C.ret30, 0.6),
+    f('Momentum 14 Tage', ch.d14, C.ret14, 0.4),
   ];
   const long = [
-    isNum(ch.d200) && factor('Momentum 200 Tage', `${signed(ch.d200)} %`, scale(ch.d200, 120, 55), 0.4),
-    isNum(ch.y1) && factor('Momentum 1 Jahr', `${signed(ch.y1)} %`, scale(ch.y1, 200, 65), 0.3),
-    highFactor(c.ath_change_percentage, 'Allzeithoch', 0.3),
+    f('Momentum 200 Tage', ch.d200, C.ret200, 0.4, isNum(ch.d200) ? `${signed(ch.d200)} %${ch.d200 > 80 ? ' – stark gelaufen, Rückschlaggefahr' : ''}` : null),
+    f('Momentum 1 Jahr', ch.y1, C.ret365, 0.35),
+    f('Abstand zum Allzeithoch', c.ath_change_percentage, C.high, 0.25, isNum(c.ath_change_percentage) ? `${num(-c.ath_change_percentage, 0)} % unter dem Allzeithoch` : null),
   ];
 
   const volDaily = prices.length >= 60 ? stdev(logReturns(prices)) * Math.sqrt(24) * 100 : null;
-  return assemble(c, shortTerm(prices, ch.h24), horizon(medium), horizon(long), regime, volDaily);
+  return assemble(c, horizon(short), horizon(medium), horizon(long), regime, volDaily);
 }
 
-// Verfeinerte Bewertung mit 365 Tagen Kursdaten
-export function detailAnalyse(c, ind, regime = 0) {
+// Verfeinerte Bewertung mit Tageskursen (bis zu 4 Jahre) und Nachrichten
+export function detailAnalyse(c, ind, regime, news) {
   const quick = c.analysis;
   if (quick.stable || ind.n < 30) return quick;
   const s = scoreAt(ind, ind.n - 1);
-  return assemble(c, quick.short,
-    s.medium.score !== null ? s.medium : quick.medium,
-    s.long.score !== null ? s.long : quick.long,
-    regime, quick.risk.vol);
+  const pick = (a, b) => (a.score !== null ? a : b);
+  return assemble(c, pick(s.short, quick.short), pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
 }
 
 // ---------- Marktindex ----------
 
-export function marketIndex(coins, fng) {
+export function marketIndex(coins, btcInd, fng, news) {
   const btc = coins.find((c) => c.id === 'bitcoin');
   const top = coins.filter((c) => !isStable(c)).slice(0, 200);
-  if (!btc?.analysis || btc.analysis.score === null || top.length < 20) return null;
+  if (!btc || top.length < 20) return null;
 
+  const regime = btcInd ? regimeAt(btcInd, btcInd.n - 1, fng?.value) : regimeFromMarket(btc);
   const share = (key) => {
     const vals = top.map((c) => c[key]).filter(isNum);
     return vals.length ? vals.filter((v) => v > 0).length / vals.length : 0.5;
   };
   const up7 = share('price_change_percentage_7d_in_currency');
   const up30 = share('price_change_percentage_30d_in_currency');
-  const d14 = top.slice(0, 100).map((c) => c.price_change_percentage_14d_in_currency).filter(isNum).sort((a, b) => a - b);
-  const median = d14.length ? d14[Math.floor(d14.length / 2)] : 0;
 
-  const parts = [
-    factor('Bitcoin-Trend', `Bitcoin-Score ${signed(btc.analysis.score, 0)} (${btc.analysis.label})`, btc.analysis.score / 100, 0.3),
-    factor('Marktbreite', `${num(up7 * 100, 0)} % der Top 200 im Plus über 7 Tage, ${num(up30 * 100, 0)} % über 30 Tage`, clamp((up7 + up30 - 1) * 1.5), 0.3),
-    factor('Momentum der Top 100', `Mittlere Veränderung in 14 Tagen: ${signed(median)} %`, scale(median, 15, 12), 0.15),
-  ];
-  if (fng) {
-    // Gegenläufig gewertet, aber nur außerhalb der neutralen Zone: Angst war historisch eher
-    // Kaufgelegenheit, Gier ein Warnzeichen
-    const v = fng.value;
-    const score = v >= 60 ? -Math.min(1, (v - 60) / 30) : v <= 40 ? Math.min(1, (40 - v) / 30) : 0;
-    const text = v <= 25 ? 'extreme Angst, historisch eher Kaufgelegenheit' : v <= 40 ? 'Angst, eher günstige Einstiegsphase'
-      : v >= 75 ? 'extreme Gier, historisch ein Warnzeichen' : v >= 60 ? 'Gier, erhöhte Rückschlaggefahr' : 'neutrale Stimmung';
-    parts.push(factor('Fear & Greed', `${v} – ${text}`, score, 0.25));
-  }
+  // Gewichte so umrechnen, dass die Faktoren der Marktphase zusammen 70 % ausmachen
+  const total = regime.factors.reduce((s, f) => s + f.weight, 0) || 1;
+  const parts = regime.factors.map((f) => ({ ...f, weight: f.weight / total * 0.7 }));
+  parts.push(factor('Marktbreite', `${num(up7 * 100, 0)} % der Top 200 im Plus über 7 Tage, ${num(up30 * 100, 0)} % über 30 Tage`, clamp((up7 + up30 - 1) * 1.5), 0.2));
+  if (news && news.score !== null) parts.push(factor('Nachrichtenlage', news.text, news.score, 0.1));
 
   const value = Math.round(50 + 50 * combine(parts));
   let signal, label;
-  if (value >= 70) [signal, label] = ['buy', 'Kaufen'];
+  if (value >= 68) [signal, label] = ['buy', 'Kaufen'];
   else if (value >= 57) [signal, label] = ['buy', 'Eher kaufen'];
-  else if (value <= 30) [signal, label] = ['sell', 'Verkaufen'];
+  else if (value <= 32) [signal, label] = ['sell', 'Verkaufen'];
   else if (value <= 43) [signal, label] = ['sell', 'Eher verkaufen'];
   else [signal, label] = ['hold', 'Halten'];
-  return { value, signal, label, parts, regime: clamp((value - 50) / 50) };
+  return { value, signal, label, parts, regime };
+}
+
+// ---------- Nachrichten ----------
+
+const POSITIVE = /\b(surg\w*|soar\w*|rall(y|ies|ied)|jump\w*|climb\w*|gains?|record high|all[- ]time high|bullish|breakout|approv\w*|inflows?|adopt\w*|partner\w*|integrat\w*|launch\w*|upgrade\w*|mainnet|listing|listed|accumulat\w*|buys?|bought|purchas\w*|invest\w*|funding|raises?|raised|reclaim\w*|rebound\w*|recover\w*|outperform\w*|milestone|expand\w*|wins?|boost\w*|rises?|rose|tops?|strong\w*|optimis\w*)\b/gi;
+const NEGATIVE = /\b(hack\w*|exploit\w*|breach\w*|stolen|theft|drain\w*|rug ?pull|scam\w*|fraud\w*|lawsuit|sue[sd]?|charges?|charged|indict\w*|investigat\w*|probe|bans?|banned|crackdown|delist\w*|bankrupt\w*|insolven\w*|collaps\w*|crash\w*|plung\w*|plummet\w*|tumbl\w*|slump\w*|sell[- ]?off|liquidat\w*|outage|halt\w*|depeg\w*|vulnerab\w*|dump\w*|bearish|warn\w*|fears?|loss(es)?|declin\w*|drops?|dropped|falls?|fell|sinks?|sank|outflows?|sanction\w*|reject\w*|slides?|slid|weak\w*|risks?|concerns?|struggl\w*)\b/gi;
+const NEWS_WINDOW_MS = 7 * 86_400_000;
+
+// Einfache Stichwort-Auswertung der Schlagzeilen. Erkennt keine Ironie und keinen Zusammenhang –
+// deshalb fließt das Ergebnis nur mit kleinem Gewicht in die Prognose ein.
+export function analyseNews(articles, now = Date.now()) {
+  const items = articles.filter((a) => now - a.time < NEWS_WINDOW_MS).map((a) => {
+    const text = `${a.title}. ${a.description ?? ''}`;
+    const pos = (text.match(POSITIVE) || []).length, neg = (text.match(NEGATIVE) || []).length;
+    return { ...a, tone: pos > neg ? 1 : neg > pos ? -1 : 0 };
+  });
+  if (items.length < 3) return { score: null, items, text: 'Zu wenige aktuelle Meldungen für eine Auswertung.' };
+  // Neuere Meldungen zählen stärker
+  let s = 0, w = 0;
+  for (const it of items) {
+    const weight = 1 / (1 + (now - it.time) / 86_400_000);
+    s += it.tone * weight; w += weight;
+  }
+  const pos = items.filter((i) => i.tone > 0).length, neg = items.filter((i) => i.tone < 0).length;
+  return { score: clamp(s / w * 1.5), items,
+    text: `${items.length} Meldungen der letzten 7 Tage: ${pos} positiv, ${neg} negativ, ${items.length - pos - neg} neutral` };
 }
 
 // ---------- Rückblick-Test und erwartete Schwankung ----------
 
 // Wie entwickelte sich der Kurs in der Vergangenheit, nachdem das Modell ein Signal zeigte?
-export function backtest(ind, which, days, start) {
+// Bewertet wird der Gesamt-Score aus Tagesdaten und Marktphase; Nachrichten und Stundenkurse
+// gibt es für die Vergangenheit nicht.
+export function backtest(ind, btcInd, fngByDay, days) {
+  const btcIndex = btcInd ? new Map(btcInd.days.map((d, j) => [d, j])) : null;
   const bucket = () => ({ n: 0, up: 0, sum: 0 });
   const res = { buy: bucket(), sell: bucket(), all: bucket() };
-  for (let i = start; i + days < ind.n; i++) {
-    const s = scoreAt(ind, i)[which].score;
-    if (s === null) continue;
+  // Die ersten 200 Tage dienen als Vorlauf für den 200-Tage-Schnitt, bei kurzer Historie weniger
+  for (let i = Math.min(200, Math.floor(ind.n / 3)); i + days < ind.n; i++) {
+    const j = btcIndex?.get(ind.days[i]);
+    if (btcIndex && j === undefined) continue;
+    const s = scoreAt(ind, i);
+    const regime = btcInd ? regimeAt(btcInd, j, fngByDay?.get(ind.days[i])) : horizon([]);
+    const raw = totalScore(s.short, s.medium, s.long, regime);
+    if (raw === null) continue;
+    const [signal] = signalOf(Math.round(raw * 100));
     const fwd = (ind.prices[i + days] / ind.prices[i] - 1) * 100;
     const targets = [res.all];
-    if (s >= 0.2) targets.push(res.buy);
-    if (s <= -0.2) targets.push(res.sell);
+    if (signal === 'buy') targets.push(res.buy);
+    if (signal === 'sell') targets.push(res.sell);
     for (const b of targets) { b.n++; b.sum += fwd; if (fwd > 0) b.up++; }
   }
   const done = (b) => ({ n: b.n, upRate: b.n ? b.up / b.n * 100 : null, mean: b.n ? b.sum / b.n : null });

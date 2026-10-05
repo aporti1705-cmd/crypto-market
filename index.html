@@ -15,11 +15,6 @@
         <a href="#/" data-nav="market">Markt</a>
         <a href="#/portfolio" data-nav="portfolio">Portfolio</a>
       </nav>
-      <div class="chips" id="currency" role="group" aria-label="Währung">
-        <button data-currency="eur" class="chip active">EUR</button>
-        <button data-currency="usd" class="chip">USD</button>
-        <button data-currency="chf" class="chip">CHF</button>
-      </div>
       <div class="status">
         <span id="dot" class="dot"></span>
         <span id="updated">Lade Kurse …</span>
@@ -34,20 +29,21 @@
     <footer class="note">
       <h2>So entstehen die Prognosen</h2>
       <p>
-        Jeder Coin wird auf drei Zeithorizonten bewertet: kurzfristig (Trend, Richtung und RSI der letzten 7 Tage),
-        mittelfristig (Momentum über 1–4 Wochen, gleitende Durchschnitte, MACD) und langfristig (200-Tage-Trend,
-        Momentum über Monate, Abstand zum Hoch). Dazu kommt die Marktphase aus dem Markt-Index, weil Altcoins stark
-        mit dem Gesamtmarkt laufen. Aus allem ergibt sich ein Score von −100 bis +100 und daraus das Signal.
-        In der Detailansicht siehst du jeden Faktor einzeln und wie gut das Modell bei diesem Coin im letzten Jahr lag.
+        Das Modell wurde an 4 Jahren Tageskursen von 38 großen Coins überprüft: Für jeden Indikator wurde gemessen, wie
+        sich der Kurs 7, 14, 30 und 90 Tage später entwickelt hat. Daraus ergeben sich vier Bausteine: die Marktphase
+        (Stärke von Bitcoin, Fear &amp; Greed), ein kurzfristiger Teil (Erholung nach Ausverkauf), ein mittelfristiger
+        (Momentum über Wochen, Handelsvolumen) und ein langfristiger (früher Aufwärtstrend gut, Überdehnung schlecht).
+        Zusammen ergeben sie einen Score von −100 bis +100 und daraus das Signal. In der Detailansicht kommen 4 Jahre
+        Kursgeschichte des Coins, aktuelle Nachrichten und ein Rückblick-Test dazu. Alle Preise in US-Dollar.
       </p>
       <p class="disclaimer">
         <strong>Keine Anlageberatung, keine Garantie.</strong> Kurse lassen sich nicht sicher vorhersagen. Die Signale
-        beruhen ausschließlich auf vergangenen Kursen, kennen keine Nachrichten und nicht deine persönliche Situation –
+        beruhen auf vergangenen Kursen und einer groben Stichwort-Auswertung von Schlagzeilen, kennen nicht deine persönliche Situation –
         sie können falsch liegen. Kryptowährungen sind hochriskant: Investiere nur Geld, dessen Verlust du verkraften kannst.
       </p>
       <p class="source">Kursdaten: <a href="https://www.coingecko.com/" target="_blank" rel="noopener">CoinGecko</a> ·
-        Fear &amp; Greed Index: <a href="https://alternative.me/crypto/fear-and-greed-index/" target="_blank" rel="noopener">alternative.me</a> ·
-        Aktualisierung alle 2 Minuten</p>
+        Kursgeschichte: Binance · Fear &amp; Greed Index: <a href="https://alternative.me/crypto/fear-and-greed-index/" target="_blank" rel="noopener">alternative.me</a> ·
+        Nachrichten: cryptocurrency.cv · Aktualisierung alle 2 Minuten</p>
     </footer>
   </main>
 
