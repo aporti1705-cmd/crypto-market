@@ -3,16 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Krypto Markt – Live-Kurse & Signale</title>
-  <meta name="description" content="Aktuelle Krypto-Kurse mit automatisch berechnetem Ausblick und Kauf-/Verkaufssignal.">
+  <title>Krypto Markt – Live-Kurse, Prognosen & Portfolio</title>
+  <meta name="description" content="Live-Kurse der Top 1000 Kryptowährungen mit Prognose, Kauf-/Verkaufssignal, Markt-Index und Portfolio.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="top">
     <div class="wrap top-inner">
-      <div>
-        <h1>Krypto Markt</h1>
-        <p class="sub">Live-Kurse der Top 50 Coins mit technischem Ausblick</p>
+      <a class="brand" href="#/">Krypto Markt</a>
+      <nav>
+        <a href="#/" data-nav="market">Markt</a>
+        <a href="#/portfolio" data-nav="portfolio">Portfolio</a>
+      </nav>
+      <div class="chips" id="currency" role="group" aria-label="Währung">
+        <button data-currency="eur" class="chip active">EUR</button>
+        <button data-currency="usd" class="chip">USD</button>
+        <button data-currency="chf" class="chip">CHF</button>
       </div>
       <div class="status">
         <span id="dot" class="dot"></span>
@@ -22,63 +28,29 @@
   </header>
 
   <main class="wrap">
-    <section id="summary" class="summary" aria-label="Marktüberblick"></section>
-
-    <section class="controls">
-      <input id="search" type="search" placeholder="Coin suchen (z. B. Bitcoin, ETH) …" aria-label="Coin suchen">
-      <div class="chips" id="filters" role="group" aria-label="Nach Signal filtern">
-        <button data-filter="all" class="chip active">Alle</button>
-        <button data-filter="buy" class="chip">Kaufen</button>
-        <button data-filter="hold" class="chip">Halten</button>
-        <button data-filter="sell" class="chip">Verkaufen</button>
-      </div>
-      <div class="chips" id="currency" role="group" aria-label="Währung">
-        <button data-currency="eur" class="chip active">EUR</button>
-        <button data-currency="usd" class="chip">USD</button>
-        <button data-currency="chf" class="chip">CHF</button>
-      </div>
-    </section>
-
     <div id="error" class="error" hidden></div>
+    <div id="view"></div>
 
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th class="num col-rank">#</th>
-            <th>Coin</th>
-            <th class="num">Kurs</th>
-            <th class="num">24 h</th>
-            <th class="num col-7d">7 T</th>
-            <th class="num col-30d">30 T</th>
-            <th class="num col-cap">Marktkap.</th>
-            <th class="col-chart">7-Tage-Verlauf</th>
-            <th class="col-outlook">Ausblick</th>
-            <th>Signal</th>
-          </tr>
-        </thead>
-        <tbody id="rows">
-          <tr><td colspan="10" class="empty">Lade Kurse …</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <section class="note">
-      <h2>So entstehen die Signale</h2>
+    <footer class="note">
+      <h2>So entstehen die Prognosen</h2>
       <p>
-        Ausblick und Signal werden automatisch aus den Kursdaten der letzten 7 bzw. 30 Tage berechnet:
-        RSI (überkauft/überverkauft), Trend (24-Stunden-Schnitt gegenüber 7-Tage-Schnitt) und Momentum
-        (Veränderung über 24 Stunden und 30 Tage). Ein Klick auf einen Coin zeigt, wie sein Signal zustande kommt.
+        Jeder Coin wird auf drei Zeithorizonten bewertet: kurzfristig (Trend, Richtung und RSI der letzten 7 Tage),
+        mittelfristig (Momentum über 1–4 Wochen, gleitende Durchschnitte, MACD) und langfristig (200-Tage-Trend,
+        Momentum über Monate, Abstand zum Hoch). Dazu kommt die Marktphase aus dem Markt-Index, weil Altcoins stark
+        mit dem Gesamtmarkt laufen. Aus allem ergibt sich ein Score von −100 bis +100 und daraus das Signal.
+        In der Detailansicht siehst du jeden Faktor einzeln und wie gut das Modell bei diesem Coin im letzten Jahr lag.
       </p>
       <p class="disclaimer">
-        <strong>Keine Anlageberatung.</strong> Die Signale sind rein rechnerische Indikatoren, berücksichtigen weder
-        Nachrichten noch deine persönliche Situation und können falsch liegen. Kryptowährungen sind hochriskant –
-        investiere nur Geld, dessen Verlust du verkraften kannst.
+        <strong>Keine Anlageberatung, keine Garantie.</strong> Kurse lassen sich nicht sicher vorhersagen. Die Signale
+        beruhen ausschließlich auf vergangenen Kursen, kennen keine Nachrichten und nicht deine persönliche Situation –
+        sie können falsch liegen. Kryptowährungen sind hochriskant: Investiere nur Geld, dessen Verlust du verkraften kannst.
       </p>
-      <p class="source">Kursdaten: <a href="https://www.coingecko.com/" target="_blank" rel="noopener">CoinGecko</a> · Aktualisierung alle 60 Sekunden</p>
-    </section>
+      <p class="source">Kursdaten: <a href="https://www.coingecko.com/" target="_blank" rel="noopener">CoinGecko</a> ·
+        Fear &amp; Greed Index: <a href="https://alternative.me/crypto/fear-and-greed-index/" target="_blank" rel="noopener">alternative.me</a> ·
+        Aktualisierung alle 2 Minuten</p>
+    </footer>
   </main>
 
-  <script src="app.js"></script>
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
