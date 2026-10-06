@@ -56,8 +56,20 @@ export function parseNumber(value) {
   if (!s) return NaN;
   const comma = s.lastIndexOf(','), dot = s.lastIndexOf('.');
   if (comma > -1 && dot > -1) s = comma > dot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
-  else if (comma > -1) s = /^-?\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
+  // Nur Kommas: Tausendertrennung, wenn es danach aussieht ("1,234,567") – "0,029" ist immer eine Dezimalzahl
+  else if (comma > -1) s = /^-?[1-9]\d{0,2}(,\d{3})+$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
   return Number(s);
+}
+
+// Eingaben auf der Seite sind deutsch geschrieben: Das Komma ist immer das Dezimalzeichen ("1,234" = 1,234),
+// Punkte davor sind Tausendertrennung. Ohne Komma gilt der Punkt als Dezimalzeichen ("0.5"),
+// außer er steht eindeutig als Tausendertrennung ("5.000").
+export function parseInput(value) {
+  const s = String(value ?? '').replace(/[^\d.,\-]/g, '');
+  if (!s) return NaN;
+  if (s.includes(',')) return Number(s.replace(/\./g, '').replace(',', '.'));
+  // "5.000" oder "1.250.000" meint Tausender, "0.5" eine Dezimalzahl
+  return Number(/^-?[1-9]\d{0,2}(\.\d{3})+$/.test(s) ? s.replace(/\./g, '') : s);
 }
 
 // ---------- Import ----------

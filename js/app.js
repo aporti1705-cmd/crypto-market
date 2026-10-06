@@ -1072,8 +1072,8 @@ function portfolioView() {
     const m = text.match(/^(.*)\(([^)]+)\)$/);
     const c = (m && state.coins.find((x) => x.name === m[1].trim() && x.symbol.toUpperCase() === m[2].trim().toUpperCase()))
       || find({ symbol: text, name: text });
-    const amount = pf.parseNumber($('#p-amount').value);
-    const cost = pf.parseNumber($('#p-cost').value);
+    const amount = pf.parseInput($('#p-amount').value);
+    const cost = pf.parseInput($('#p-cost').value);
     if (!c) return fail(`„${text}“ wurde unter den geladenen Coins nicht gefunden.`);
     if (!(amount > 0)) return fail('Bitte eine Menge größer als 0 eingeben.');
     message = `${c.name} hinzugefügt.`;
@@ -1154,7 +1154,7 @@ function portfolioView() {
   $('#p-cash').addEventListener('submit', (e) => {
     e.preventDefault();
     const raw = $('#p-cash-value').value.trim();
-    const cash = raw ? pf.parseNumber(raw) : 0;
+    const cash = raw ? pf.parseInput(raw) : 0;
     if (!(cash >= 0)) return say('Bitte einen Betrag von 0 oder mehr eingeben.');
     message = 'Bargeld gespeichert.';
     $('#p-cash-value').blur();
@@ -1180,7 +1180,7 @@ function portfolioView() {
     const pos = depot.data.positions.find((p) => pf.keyOf(p) === edit.key);
     if (!pos) return { error: 'Diese Position gibt es nicht mehr.' };
     const c = find(pos);
-    const units = pf.parseNumber($('#e-amount').value);
+    const units = pf.parseInput($('#e-amount').value);
     if (!(units > 0)) return { pos, c, error: 'Bitte eine Menge größer als 0 eingeben.' };
     if (units > pos.amount * 1.0000001) return { pos, c, error: `Du hast nur ${pos.amount.toLocaleString('de-DE', { maximumFractionDigits: 8 })}.` };
     const amount = Math.min(units, pos.amount);
@@ -1420,7 +1420,7 @@ function portfolioView() {
       const held = new Set(known.map((r) => r.c.id));
       const candidates = state.coins.filter((c) => c.analysis.signal === 'buy' && !held.has(c.id) &&
         (c.market_cap_rank ?? 9999) <= 300 && c.total_volume >= 5e6 && !DERIVATIVE.test(c.name))
-        .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 12)
+        .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 16)
         .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis }));
       const p = plan({
         holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
@@ -1460,6 +1460,9 @@ function portfolioView() {
       <p>${esc(p.exposure.text)} Investiert sind ${num(p.investedShare * 100, 0)} %, das Ziel liegt bei ${num(p.targetShare * 100, 0)} %.
         ${p.moves.length ? `Gebühren für alle Schritte zusammen: rund ${money(p.fees)}.` : ''}</p>
       ${advice.missing ? `<p class="notice">${advice.missing} Position(en) ohne Kurs sind nicht berücksichtigt.</p>` : ''}
+      ${p.unplaced ? `<p class="notice">Rund ${money(p.unplaced.usd)} bleiben in Reserve, obwohl dein Ziel niedriger liegt: ${p.unplaced.reason === 'signals'
+        ? 'Im Moment hat kein passender Coin ein Kaufsignal. In Coins ohne Kaufsignal schlägt der Manager nichts vor.'
+        : 'Die Coins mit Kaufsignal sind bis zur Obergrenze je Coin gefüllt, weitere passende gibt es gerade nicht.'}</p>` : ''}
       ${cards || '<p><strong>Im Moment kein Handlungsbedarf.</strong> Dein Portfolio passt zur gewählten Reserve und zur Marktlage; jeder Handel würde nur Gebühren kosten.</p>'}
       ${holds}
       <details${open ? ' open' : ''}><summary>So arbeitet der Manager – und was er nicht kann</summary>
@@ -1471,7 +1474,7 @@ function portfolioView() {
           <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
           <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %, riskante Coins weniger), höchstens 8 Positionen.</li>
           <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
-          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> im Durchschnitt rund +5 % pro Monat bei einem größten zwischenzeitlichen Rückgang von 52 % – mit der vorgeschlagenen Reserve. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> im Durchschnitt rund +6 % pro Monat bei einem größten zwischenzeitlichen Rückgang von 51 % – mit der vorgeschlagenen Reserve. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
           <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
         </ul>
       </details>

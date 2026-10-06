@@ -13,6 +13,7 @@
 export const DEFAULTS = {
   fee: 0.0025,            // Gebühr je Kauf oder Verkauf
   maxPositions: 8,
+  maxPositionsHard: 12,   // äußerste Grenze, wenn sonst Reserve übrig bliebe
   maxWeight: 0.2,         // Obergrenze je Coin, Anteil am Gesamtportfolio
   maxWeightCore: 0.4,     // Obergrenze für Bitcoin und Ethereum
   minTradeShare: 0.04,    // kleinere Abweichungen vom Ziel werden nicht gehandelt
@@ -138,18 +139,38 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   const buyers = [...kept.filter((c) => signal(c) === 'buy' && c.target > 0 && !c.why), ...entries];
   let free = budget - coins.reduce((s, c) => s + c.target, 0);
   // Verteilung nach Score; was über die Obergrenze hinausginge, fließt an die übrigen
-  for (let round = 0; round < 4 && free > minTrade && buyers.length; round++) {
-    const open = buyers.filter((c) => cap(c) - c.target > 1);
-    const weight = open.reduce((s, c) => s + Math.max(c.adj, 5), 0);
-    if (!weight) break;
-    let used = 0;
-    for (const c of open) {
-      const add = Math.min(free * Math.max(c.adj, 5) / weight, cap(c) - c.target);
-      c.target += add; used += add;
+  const distribute = () => {
+    for (let round = 0; round < 6 && free > minTrade && buyers.length; round++) {
+      // Nur Coins, die noch mindestens den Mindestbetrag aufnehmen können, die besten zuerst
+      const room = buyers.filter((c) => cap(c) - c.target >= minTrade).sort((a, b) => b.adj - a.adj);
+      if (!room.length) break;
+      // So viele Coins bedienen, dass jeder mindestens den Mindestbetrag bekommt. Sonst zerfiele das Budget
+      // in Kleinstbeträge unter der Handelsschwelle, die später verfallen.
+      let open = [], weight = 0;
+      for (let n = Math.min(room.length, Math.max(1, Math.floor(free / minTrade))); n >= 1; n--) {
+        open = room.slice(0, n);
+        weight = open.reduce((s, c) => s + Math.max(c.adj, 5), 0);
+        if (free * Math.max(open[n - 1].adj, 5) / weight >= minTrade) break;
+      }
+      let used = 0;
+      for (const c of open) {
+        const add = Math.min(free * Math.max(c.adj, 5) / weight, cap(c) - c.target);
+        c.target += add; used += add;
+      }
+      free -= used;
+      if (used < 1) break;
     }
-    free -= used;
-    if (used < 1) break;
+  };
+  distribute();
+  // Bleibt Budget übrig, weil alle Plätze belegt oder die Obergrenzen erreicht sind, kommen weitere Kandidaten
+  // dazu – auch über die übliche Zahl an Positionen hinaus. Sonst würde das gewählte Reserve-Ziel nicht erreicht.
+  for (const cand of fresh) {
+    if (free <= minTrade || kept.length + entries.length >= o.maxPositionsHard) break;
+    if (entries.includes(cand)) continue;
+    entries.push(cand); buyers.push(cand);
+    distribute();
   }
+
 
   // 5. Aus Zielwerten werden Schritte – kleine Abweichungen bleiben liegen
   const moves = [];
@@ -233,10 +254,13 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
 
   const fees = moves.reduce((s, m) => s + m.fee, 0);
   const targetInvested = all.reduce((s, c) => s + c.target, 0);
+  // Was sich nicht unterbringen lässt, bleibt in Reserve – mit Begründung für die Anzeige
+  const left = budget - targetInvested;
+  const unplaced = left > minTrade ? { usd: left, reason: buyers.length ? 'caps' : 'signals' } : null;
   return {
     total, reserve, invested, exposure, suggested, minTrade,
     investedShare: invested / total, targetShare: targetInvested / total,
-    moves, fees, targets: all.map((c) => ({ id: c.id, target: c.target, value: c.value })),
+    moves, fees, unplaced, targets: all.map((c) => ({ id: c.id, target: c.target, value: c.value })),
     holds: coins.filter((c) => c.target === c.value && c.value > 0).map((c) => ({ id: c.id, name: c.name, score: score(c), signal: signal(c) })),
   };
 }
