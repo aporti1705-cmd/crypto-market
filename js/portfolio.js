@@ -3,7 +3,7 @@
 const KEY = 'krypto-markt-depot';
 const LEGACY_KEY = 'krypto-markt-portfolio';   // frühere Version: nur die Liste der Positionen
 
-export const empty = () => ({ positions: [], cash: 0, reservePct: null });
+export const empty = () => ({ positions: [], cash: 0, reservePct: null, reserveMode: 'balanced' });
 
 // Macht aus beliebigen gespeicherten Daten ein gültiges Portfolio
 export function normalise(data) {
@@ -17,7 +17,9 @@ export function normalise(data) {
   const pct = data?.reservePct;
   return { positions, cash: Number.isFinite(data?.cash) && data.cash > 0 ? data.cash : 0,
     // Gewünschte Reserve in Prozent; null bedeutet: dem Vorschlag der Seite folgen
-    reservePct: Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null };
+    reservePct: Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null,
+    // Welchem Vorschlag gefolgt wird, solange kein eigener Wert gesetzt ist
+    reserveMode: data?.reserveMode === 'cautious' ? 'cautious' : 'balanced' };
 }
 
 export function load() {

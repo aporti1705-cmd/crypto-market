@@ -35,16 +35,61 @@ const RISK_CAP = [1, 1, 0.75, 0.5];      // riskante Coins bekommen eine kleiner
 // Abgewerteter Score: riskantere Coins brauchen einen höheren Score für denselben Rang
 export const adjusted = (a) => (a.score ?? 0) * RISK_WEIGHT[a.risk?.level ?? 2];
 
-// Wie viel des Portfolios investiert sein soll, abhängig von der Marktphase
-export function exposureFor(regime) {
+// Investitionsquote je Marktphase: Stützpunkte [Score der Marktphase, Anteil investiert], dazwischen linear.
+// Beide Kurven wurden mit Gebühren über 2018–2026 zurückgerechnet (wöchentliche Prüfung, 86 Coins):
+//   ausgewogen: rund +64 % pro Jahr, größter zwischenzeitlicher Rückgang 48 %
+//   vorsichtig: rund +48 % pro Jahr, größter zwischenzeitlicher Rückgang 35 % (2022–2026: 20 % statt 42 %)
+// Die vorsichtige Kurve folgt dem halben Kelly-Anteil je Marktphase: Chance geteilt durch Schwankung der
+// 30-Tage-Ergebnisse. Feinere Unterschiede zwischen ähnlichen Kurven lagen im Rauschen der Rückrechnung.
+export const EXPOSURE_CURVES = {
+  balanced: [[-0.4, 0.15], [-0.2, 0.3], [0, 0.55], [0.2, 0.85], [0.4, 1]],
+  cautious: [[-0.2, 0], [-0.1, 0.1], [0, 0.2], [0.1, 0.3], [0.3, 0.4], [0.4, 0.7], [0.55, 1]],
+};
+export const EXPOSURE_CURVE = EXPOSURE_CURVES.balanced;
+export const RESERVE_BACKTEST = {
+  balanced: { perYear: 64, drawdown: 48 },
+  cautious: { perYear: 48, drawdown: 35 },
+};
+
+// Was der Gesamtmarkt 30 Tage nach einer vergleichbaren Marktphase getan hat (alle 86 Coins, 2018–2026):
+// [Score bis, Anteil der Fälle mit höherem Kurs in %, Ergebnis im schlechtesten Zehntel der Fälle in %]
+const PHASE_HISTORY = [[-0.2, 38, -27], [0, 45, -27], [0.2, 49, -25], [0.4, 50, -26], [0.55, 64, -20], [Infinity, 74, -16]];
+
+// Vorschläge für die Reserve in der aktuellen Marktphase, mit den Erfahrungswerten dazu
+export function reserveAdvice(regime) {
+  const pct = (curve) => Math.round((1 - exposureFor(regime, curve).share) * 100);
   const r = regime?.score;
-  if (r === null || r === undefined) return { share: 0.6, text: 'Marktphase unbekannt – mittlere Investitionsquote.' };
-  if (regime.bear) return { share: 0.15, text: 'Bärenmarkt (Bitcoin unter dem 200-Tage-Schnitt, Abwärtstrend): Großteil in Reserve halten.' };
-  if (r >= 0.4) return { share: 1, text: 'Sehr starke Marktphase: voll investiert.' };
-  if (r >= 0.15) return { share: 0.85, text: 'Gute Marktphase: überwiegend investiert.' };
-  if (r >= -0.1) return { share: 0.6, text: 'Neutrale Marktphase: ein Teil bleibt in Reserve.' };
-  if (r >= -0.3) return { share: 0.35, text: 'Schwache Marktphase: defensiv, hohe Reserve.' };
-  return { share: 0.2, text: 'Sehr schwache Marktphase: nur kleine Positionen, Großteil in Reserve.' };
+  const row = r === null || r === undefined ? null : PHASE_HISTORY.find(([limit]) => r < limit);
+  return {
+    balanced: pct(EXPOSURE_CURVES.balanced), cautious: pct(EXPOSURE_CURVES.cautious),
+    text: exposureFor(regime).text, bear: !!regime?.bear,
+    history: row ? { up: row[1], worst: row[2] } : null,
+  };
+}
+const BEAR_SHARE = 0.15;
+
+function interpolate(x, pts) {
+  if (x <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    if (x <= pts[i][0]) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      return x1 === x0 ? y1 : y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+    }
+  }
+  return pts[pts.length - 1][1];
+}
+
+// Wie viel des Portfolios investiert sein soll, abhängig von der Marktphase (in 5-%-Schritten)
+export function exposureFor(regime, curve = EXPOSURE_CURVE, bearShare = BEAR_SHARE) {
+  const r = regime?.score;
+  if (r === null || r === undefined) return { share: 0.5, text: 'Marktphase unbekannt – die Hälfte bleibt in Reserve.' };
+  let share = Math.round(interpolate(r, curve) * 20) / 20;
+  if (regime.bear && share > bearShare) {
+    return { share: bearShare, text: 'Bärenmarkt (Bitcoin unter dem 200-Tage-Schnitt, Abwärtstrend): Großteil in Reserve halten.' };
+  }
+  const text = r >= 0.4 ? 'Sehr starke Marktphase.' : r >= 0.2 ? 'Gute Marktphase.' : r >= 0 ? 'Gemischte Marktphase.'
+    : r >= -0.2 ? 'Schwache Marktphase.' : 'Sehr schwache Marktphase.';
+  return { share, text };
 }
 
 const REVIEW_DAYS = { '1–3 Monate': 14, '2–4 Wochen': 7, 'bis 1 Woche': 3 };
@@ -64,7 +109,7 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   if (!(total > 0)) return null;
 
   // Vorschlag aus der Marktphase; eine selbst gewählte Reserve hat Vorrang
-  const suggested = exposureFor(regime);
+  const suggested = exposureFor(regime, o.exposureCurve, o.bearShare);
   const exposure = Number.isFinite(o.investShare)
     ? { share: Math.min(1, Math.max(0, o.investShare)), custom: true,
       text: `Du hast eine Reserve von ${Math.round((1 - o.investShare) * 100)} % gewählt (Vorschlag: ${Math.round((1 - suggested.share) * 100)} %).` }

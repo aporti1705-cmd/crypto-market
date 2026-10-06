@@ -84,6 +84,6 @@ export async function watchPortfolio(uid, cb, onError) {
 
 export function savePortfolio(uid, data) {
   // Firestore lehnt undefined ab – der Umweg über JSON entfernt solche Felder
-  const clean = JSON.parse(JSON.stringify({ positions: data.positions, cash: data.cash, reservePct: data.reservePct ?? null, updated: Date.now() }));
+  const clean = JSON.parse(JSON.stringify({ positions: data.positions, cash: data.cash, reservePct: data.reservePct ?? null, reserveMode: data.reserveMode ?? 'balanced', updated: Date.now() }));
   return run(({ fs, db }) => fs.setDoc(fs.doc(db, 'portfolios', uid), clean));
 }

@@ -220,8 +220,12 @@ const sparkline = (c) => (c.sparkline_in_7d?.price || []).filter(isNum);
 
 export function isStable(c) {
   const p = sparkline(c);
-  if (p.length < 60) return false;
   const d30 = c.price_change_percentage_30d_in_currency;
+  if (p.length < 60) {
+    // Ohne Stundenkurse: Kurs nahe 1 $ und praktisch keine Bewegung über 7 und 30 Tage
+    const d7 = c.price_change_percentage_7d_in_currency;
+    return Math.abs(c.current_price - 1) < 0.02 && isNum(d7) && Math.abs(d7) < 1 && isNum(d30) && Math.abs(d30) < 2;
+  }
   return (Math.max(...p) - Math.min(...p)) / p[p.length - 1] < 0.02 && (!isNum(d30) || Math.abs(d30) < 3);
 }
 

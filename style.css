@@ -231,6 +231,12 @@ summary:hover { color: var(--text); }
 .empty-state .btn-row .btn { flex: 0 1 auto; }
 .foot-actions { text-align: right; margin-top: 10px; }
 
+.reserve-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0 12px; }
+.reserve-option { display: grid; gap: 2px; text-align: left; background: var(--panel-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: 12px; padding: 10px 12px; font: inherit; cursor: pointer; }
+.reserve-option strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.reserve-option .muted { font-size: 12px; line-height: 1.35; }
+.reserve-option:hover { border-color: var(--accent); }
+.reserve-option.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 #r-chip { margin-left: 6px; color: var(--accent); font-variant-numeric: tabular-nums; }
 .done-row { margin-top: 18px; }
 .dialog .reserve-value { display: block; }

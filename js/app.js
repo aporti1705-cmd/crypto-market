@@ -2,7 +2,7 @@ import { $, esc, settings, sleep, isNum, money, compact, num, signed, tone, pct 
 import * as api from './api.js';
 import * as pf from './portfolio.js';
 import * as auth from './auth.js';
-import { plan, applyMove, adjusted, exposureFor } from './manager.js';
+import { plan, applyMove, adjusted, reserveAdvice, EXPOSURE_CURVES, RESERVE_BACKTEST } from './manager.js';
 import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
@@ -446,7 +446,7 @@ function marketView() {
     const f = state.fng;
     $('#g-fng').innerHTML = f ? `<div class="label">Fear &amp; Greed Index</div>${gauge(f.value, SELL_TO_BUY)}
         <div class="gauge-value">${f.value}<small> / 100</small></div><span class="badge none big">${fngLabel(f.value)}</span>
-        <div class="hint">Vor 7 Tagen: ${f.history[7]?.value ?? '–'} · vor 30 Tagen: ${f.history[29]?.value ?? '–'}</div>`
+        <div class="hint">Vor 7 Tagen: ${isNum(f.history[7]?.value) ? f.history[7].value : '–'} · vor 30 Tagen: ${isNum(f.history[29]?.value) ? f.history[29].value : '–'}</div>`
       : '<div class="label">Fear &amp; Greed Index</div><p class="muted">Wird geladen …</p>';
     $('#market-parts').innerHTML = m ? `<div class="label">So setzt sich der Markt-Index zusammen</div>
         ${factorList(m.parts)}
@@ -918,7 +918,7 @@ function accountView(gate = false) {
     });
     $('#a-reset').addEventListener('click', () => {
       const email = $('#a-email').value.trim();
-      if (!email) { message = 'Bitte gib oben deine E-Mail-Adresse ein und klick dann erneut auf „Passwort vergessen?“.'; return update(); }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { message = 'Bitte gib oben deine E-Mail-Adresse ein und klick dann erneut auf „Passwort vergessen?“.'; return update(); }
       act(async () => { await auth.resetPassword(email); message = `Falls es ein Konto für ${email} gibt, ist eine E-Mail zum Zurücksetzen unterwegs.`; });
     });
   }
@@ -1027,9 +1027,9 @@ function portfolioView() {
         <strong class="reserve-value" id="r-value"></strong>
         <input type="range" id="r-slider" min="0" max="100" step="5" aria-label="Gewünschte Reserve in Prozent">
         <div class="range-labels"><span>0 % · voll investiert</span><span>100 % · alles in Reserve</span></div>
+        <div id="r-options" class="reserve-options"></div>
         <p class="hint" id="r-hint"></p>
         <div class="reserve-row">
-          <button class="btn ghost small" id="r-auto" type="button">Vorschlag übernehmen</button>
           <form id="p-cash" class="inline-form">
             <label for="p-cash-value">Bargeld außerhalb der Coins (USD)</label>
             <input id="p-cash-value" inputmode="decimal" placeholder="0">
@@ -1144,13 +1144,17 @@ function portfolioView() {
   }
 
   // ----- Reserve -----
-  const suggestedReserve = () => Math.round((1 - exposureFor(state.market?.regime).share) * 100);
+  // Reserve-Ziel: eigener Wert oder der Vorschlag der gewählten Art (ausgewogen/vorsichtig)
+  const reserveTarget = () => depot.data.reservePct ?? reserveAdvice(state.market?.regime)[depot.data.reserveMode];
   $('#r-slider').addEventListener('input', (e) => { $('#r-value').textContent = `${e.target.value} %`; });
   $('#r-slider').addEventListener('change', (e) => {
     message = '';
     saveDepot({ ...depot.data, reservePct: Number(e.target.value) });
   });
-  $('#r-auto').addEventListener('click', () => { message = ''; saveDepot({ ...depot.data, reservePct: null }); });
+  $('#r-options').addEventListener('click', (e) => {
+    const mode = e.target.closest('[data-mode]')?.dataset.mode;
+    if (mode) { message = ''; saveDepot({ ...depot.data, reservePct: null, reserveMode: mode }); }
+  });
   $('#p-cash').addEventListener('submit', (e) => {
     e.preventDefault();
     const raw = $('#p-cash-value').value.trim();
@@ -1168,6 +1172,7 @@ function portfolioView() {
     remove: { button: 'Entfernen', help: 'Nimmt die Menge aus dem Portfolio, ohne etwas zu verbuchen – z. B. um einen Eintrag zu korrigieren.' },
   };
   let edit = null;   // { key, action }
+  const amountText = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 12, useGrouping: false });
 
   const resolveCoin = (text) => {
     const m = text.match(/^(.*)\(([^)]+)\)$/);
@@ -1194,6 +1199,7 @@ function portfolioView() {
     const to = resolveCoin(text);
     if (!to) return { pos, c, error: `„${text}“ wurde unter den geladenen Coins nicht gefunden.` };
     if (to.id === c.id) return { pos, c, error: 'Bitte einen anderen Coin wählen.' };
+    if (!isNum(to.current_price) || !(to.current_price > 0)) return { pos, c, error: `Für ${to.name} gibt es gerade keinen Kurs.` };
     return { pos, c, amount, fee, usd, to, toUnits: usd * (1 - fee) * (1 - fee) / to.current_price };
   }
 
@@ -1224,7 +1230,7 @@ function portfolioView() {
     if (!pos) return;
     // Ohne Kurs lässt sich nicht tauschen oder verkaufen – dann direkt „Entfernen“
     edit = { key, action: find(pos) ? 'swap' : 'remove' };
-    $('#e-amount').value = String(pos.amount).replace('.', ',');
+    $('#e-amount').value = amountText(pos.amount);
     $('#e-target').value = '';
     renderEdit();
     $('#dlg-edit').showModal();
@@ -1235,7 +1241,7 @@ function portfolioView() {
   });
   $('#e-all').addEventListener('click', () => {
     const pos = depot.data.positions.find((p) => pf.keyOf(p) === edit.key);
-    if (pos) { $('#e-amount').value = String(pos.amount).replace('.', ','); renderEdit(); }
+    if (pos) { $('#e-amount').value = amountText(pos.amount); renderEdit(); }
   });
   for (const id of ['#e-amount', '#e-target', '#e-fee']) $(id).addEventListener('input', () => renderEdit());
 
@@ -1339,7 +1345,7 @@ function portfolioView() {
     const card = (label, value, sub = '', cls = '') => `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}</div><div class="muted">${sub}</div></div>`;
     $('#p-summary').innerHTML = card('Gesamtwert', money(total), `heute ${pct(total - day > 0 ? day / (total - day) * 100 : 0)} (${money(day)})`, 'main') +
       card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) : 'Kaufpreise fehlen') +
-      card('Reserve aktuell', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios · Ziel ${depot.data.reservePct ?? suggestedReserve()} %` : '');
+      card('Reserve aktuell', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios · Ziel ${reserveTarget()} %` : '');
 
     $('#p-rows').innerHTML = rows.length ? rows.map(({ pos, c, value, unit, paid: p, gain: g }) => {
       const a = c?.analysis;
@@ -1367,9 +1373,10 @@ function portfolioView() {
   }
 
   function reserve(actual, total) {
-    const suggested = suggestedReserve();
+    const advice = reserveAdvice(state.market?.regime);
     const chosen = depot.data.reservePct;
-    const value = chosen ?? suggested;
+    const mode = depot.data.reserveMode;
+    const value = reserveTarget();
     const slider = $('#r-slider');
     if (document.activeElement !== slider) { slider.value = value; $('#r-value').textContent = `${value} %`; }
     $('#r-chip').textContent = `${value} %`;
@@ -1379,11 +1386,19 @@ function portfolioView() {
       + (Math.abs(gap) < total * 0.02 ? 'Das entspricht dem Ziel.'
         : gap > 0 ? `Für ${value} % fehlen rund <strong>${money(gap)}</strong> – dafür schlägt der Manager Verkäufe vor.`
           : `Das sind rund <strong>${money(-gap)}</strong> mehr als das Ziel – dafür schlägt der Manager Käufe vor.`);
-    $('#r-hint').innerHTML = state.market
-      ? `Vorschlag für die aktuelle Marktphase: <strong>${suggested} %</strong>. ${esc(exposureFor(state.market.regime).text)}
-         ${chosen === null ? 'Du folgst dem Vorschlag.' : `Du hast <strong>${chosen} %</strong> gewählt – die Vorschläge unten richten sich danach.`}`
-      : 'Der Vorschlag wird berechnet …';
-    $('#r-auto').hidden = chosen === null;
+
+    // Zwei berechnete Vorschläge zur Wahl; der Regler setzt einen eigenen Wert
+    const option = (key, title) => `<button type="button" class="reserve-option ${chosen === null && mode === key ? 'active' : ''}" data-mode="${key}">
+        <span class="label">${title}</span><strong>${advice[key]} %</strong>
+        <span class="muted">Rückrechnung: rund +${RESERVE_BACKTEST[key].perYear} % pro Jahr, zwischenzeitlich bis zu −${RESERVE_BACKTEST[key].drawdown} %</span></button>`;
+    $('#r-options').innerHTML = state.market ? option('balanced', 'Ausgewogen') + option('cautious', 'Vorsichtig') : '';
+    const h = advice.history;
+    $('#r-hint').innerHTML = !state.market ? 'Der Vorschlag wird berechnet …' : `
+      ${chosen === null ? `Du folgst dem Vorschlag „${mode === 'cautious' ? 'Vorsichtig' : 'Ausgewogen'}“ – er passt sich der Marktphase an.`
+        : `Du hast <strong>${chosen} %</strong> selbst eingestellt. Ein Klick auf einen Vorschlag folgt wieder der Marktphase.`}
+      ${esc(advice.text)}
+      ${h ? `In vergleichbaren Marktphasen seit 2018 stand der Markt 30 Tage später in <strong>${h.up} %</strong> der Fälle höher; im schlechtesten Zehntel der Fälle lag er mindestens <strong>${-h.worst} %</strong> tiefer.` : ''}
+      Die Rückrechnungen enthalten nur Coins, die es heute noch gibt, und fallen deshalb zu gut aus.`;
     const cashInput = $('#p-cash-value');
     if (document.activeElement !== cashInput) cashInput.value = depot.data.cash ? String(Math.round(depot.data.cash * 100) / 100).replace('.', ',') : '';
   }
@@ -1412,7 +1427,7 @@ function portfolioView() {
     if (!(total > 0)) { advice = null; el.innerHTML = ''; return; }
     // Vorschläge erst zeigen, wenn alle Kurse und Bewertungen geladen sind – vorher würden sie sich ständig ändern
     const ready = state.pagesLoaded >= api.PAGES && state.refineDone && !!state.market;
-    const key = JSON.stringify([depot.data.positions.map((p) => [pf.keyOf(p), p.amount, p.cost]), depot.data.cash, depot.data.reservePct]);
+    const key = JSON.stringify([depot.data.positions.map((p) => [pf.keyOf(p), p.amount, p.cost]), depot.data.cash, depot.data.reservePct, depot.data.reserveMode]);
 
     if (ready && (!advice || advice.key !== key || recalc)) {
       recalc = false;
@@ -1425,7 +1440,7 @@ function portfolioView() {
       const p = plan({
         holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
         cash: depot.data.cash, candidates, regime: state.market.regime,
-        options: depot.data.reservePct === null ? {} : { investShare: 1 - depot.data.reservePct / 100 },
+        options: depot.data.reservePct === null ? { exposureCurve: EXPOSURE_CURVES[depot.data.reserveMode] } : { investShare: 1 - depot.data.reservePct / 100 },
       });
       advice = p ? { key, plan: p, time: new Date(), missing: rows.length - known.length } : null;
     }
@@ -1457,7 +1472,10 @@ function portfolioView() {
     el.innerHTML = `<section class="panel manager">
       <div class="panel-top"><div><h2>Vorschläge</h2><div class="muted">Stand ${advice.time.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr${stale ? ' – älter als 30 Minuten' : ''}</div></div>
         <button class="btn ghost small" data-recalc>Neu berechnen</button></div>
-      <p>${esc(p.exposure.text)} Investiert sind ${num(p.investedShare * 100, 0)} %, das Ziel liegt bei ${num(p.targetShare * 100, 0)} %.
+      <p>${depot.data.reservePct === null
+          ? `${esc(p.exposure.text)} Reserve-Ziel nach dem Vorschlag „${depot.data.reserveMode === 'cautious' ? 'Vorsichtig' : 'Ausgewogen'}“: ${num((1 - p.exposure.share) * 100, 0)} %.`
+          : esc(p.exposure.text)}
+        Investiert sind ${num(p.investedShare * 100, 0)} %; nach den Schritten wären es ${num(p.targetShare * 100, 0)} %.
         ${p.moves.length ? `Gebühren für alle Schritte zusammen: rund ${money(p.fees)}.` : ''}</p>
       ${advice.missing ? `<p class="notice">${advice.missing} Position(en) ohne Kurs sind nicht berücksichtigt.</p>` : ''}
       ${p.unplaced ? `<p class="notice">Rund ${money(p.unplaced.usd)} bleiben in Reserve, obwohl dein Ziel niedriger liegt: ${p.unplaced.reason === 'signals'
@@ -1474,7 +1492,7 @@ function portfolioView() {
           <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
           <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %, riskante Coins weniger), höchstens 8 Positionen.</li>
           <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
-          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> im Durchschnitt rund +6 % pro Monat bei einem größten zwischenzeitlichen Rückgang von 51 % – mit der vorgeschlagenen Reserve. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> mit der ausgewogenen Reserve rund +64 % pro Jahr bei einem größten zwischenzeitlichen Rückgang von 48 %, mit der vorsichtigen rund +48 % bei 35 %. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
           <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
         </ul>
       </details>
