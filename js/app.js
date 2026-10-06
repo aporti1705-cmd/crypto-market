@@ -674,7 +674,7 @@ function detailView(id) {
 // ---------- Portfolio: Speicherung und Konto ----------
 
 // Das Portfolio liegt immer im Browser und, wenn angemeldet, zusätzlich im Konto
-const depot = { data: pf.load(), user: null, sync: 'local', error: null, stop: null };
+const depot = { data: pf.load(), user: null, ready: !auth.available, sync: 'local', error: null, stop: null };
 
 function saveDepot(data) {
   depot.data = pf.normalise(data);
@@ -692,6 +692,7 @@ function saveDepot(data) {
 function renderAccountLink() {
   const link = $('#nav-account');
   link.textContent = depot.user ? (depot.user.name || depot.user.email || 'Konto') : 'Anmelden';
+  link.classList.toggle('signed-in', !!depot.user);
 }
 
 auth.onUser(async (user) => {
@@ -699,6 +700,7 @@ auth.onUser(async (user) => {
   depot.stop = null;
   const before = depot.user;
   depot.user = user;
+  depot.ready = true;
   if (user) {
     depot.sync = 'saving';
     let first = true;
@@ -719,7 +721,8 @@ auth.onUser(async (user) => {
     depot.sync = 'local';
   }
   renderAccountLink();
-  current?.update();
+  // Das Portfolio gibt es nur angemeldet – nach An- oder Abmelden die Ansicht neu wählen
+  if (/^#\/(portfolio|konto)/.test(location.hash)) route(); else current?.update();
 });
 
 const SYNC_TEXT = {
@@ -728,14 +731,25 @@ const SYNC_TEXT = {
   synced: 'In deinem Konto gespeichert – auf jedem Gerät abrufbar, auf dem du dich anmeldest.',
 };
 
-function accountView() {
+// gate: Die Ansicht steht anstelle des Portfolios, solange niemand angemeldet ist
+function accountView(gate = false) {
   let shown = null, message = '', busy = false;
+  const key = () => (!depot.ready ? 'wait' : depot.user?.uid ?? (auth.available ? 'out' : 'off'));
+  const BENEFITS = `<ul class="benefits">
+      <li><div><strong>Dein Portfolio, überall</strong><span>Im Konto gespeichert und auf jedem Gerät abrufbar.</span></div></li>
+      <li><div><strong>Konkrete Schritte</strong><span>Der Portfolio-Manager sagt, was du kaufen, halten oder verkaufen solltest – mit Begründung, Gebühr und Zeitrahmen.</span></div></li>
+      <li><div><strong>Schutz bei fallenden Kursen</strong><span>Verkaufsempfehlung, sobald ein Coin deutlich unter sein Hoch fällt oder der Markt dreht.</span></div></li>
+    </ul>`;
 
   function render() {
-    shown = depot.user?.uid ?? (auth.available ? 'out' : 'off');
+    shown = key();
+    if (shown === 'wait') {
+      view.innerHTML = '<section class="panel"><p class="muted">Anmeldung wird geprüft …</p></section>';
+      return;
+    }
     if (!auth.available) {
-      view.innerHTML = `<h2>Konto</h2><section class="panel">
-        <p>Konten sind auf dieser Seite noch nicht eingerichtet. Dein Portfolio wird solange nur in diesem Browser gespeichert.</p>
+      view.innerHTML = `<h2>${gate ? 'Portfolio' : 'Konto'}</h2><section class="panel">
+        <p>${gate ? 'Für das Portfolio brauchst du ein Konto – ' : ''}Konten sind auf dieser Seite noch nicht eingerichtet.</p>
         <p class="hint">Für Betreiber: Firebase-Projekt anlegen und die Zugangsdaten in <code>js/firebase-config.js</code> eintragen – die Schritte stehen in der README.</p>
       </section>`;
       return;
@@ -750,9 +764,8 @@ function accountView() {
       $('#a-logout').addEventListener('click', () => act(() => auth.logout()));
       return;
     }
-    view.innerHTML = `<h2>Anmelden oder Konto erstellen</h2>
-      <p class="hint">Mit einem Konto wird dein Portfolio gespeichert und ist auf jedem Gerät abrufbar. Ein Portfolio, das du schon in diesem Browser angelegt hast, wird beim ersten Anmelden übernommen.</p>
-      <section class="panel account">
+    const form = `<section class="panel account">
+        <h2>Anmelden oder Konto erstellen</h2>
         <button class="btn google" id="a-google" type="button">Mit Google anmelden</button>
         <div class="or"><span>oder mit E-Mail-Adresse</span></div>
         <form id="a-form" class="form">
@@ -766,6 +779,14 @@ function accountView() {
         </form>
         <p id="a-msg" class="notice" hidden></p>
       </section>`;
+    view.innerHTML = `<div class="gate">
+        <div>
+          <h1>${gate ? 'Melde dich an, um dein Portfolio zu sehen' : 'Dein Konto bei Krypto Markt'}</h1>
+          <p class="lead">Das Portfolio und der Portfolio-Manager sind an ein Konto gebunden. Kurse, Prognosen und Markt-Index bleiben ohne Anmeldung frei.</p>
+          ${BENEFITS}
+        </div>
+        ${form}
+      </div>`;
     $('#a-google').addEventListener('click', () => act(() => auth.loginGoogle(), true));
     $('#a-form').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -794,8 +815,7 @@ function accountView() {
   }
 
   function update() {
-    const now = depot.user?.uid ?? (auth.available ? 'out' : 'off');
-    if (now !== shown) render();
+    if (key() !== shown) render();
     const msg = $('#a-msg');
     if (msg) { msg.hidden = !message; msg.textContent = message; }
     const sync = $('#a-sync');
@@ -809,6 +829,7 @@ function accountView() {
 
 // ---------- Portfolio ----------
 
+const ALLOC_COLORS = ['var(--accent)', 'var(--violet)', 'var(--up)', '#38bdf8', 'var(--hold)', '#f472b6'];
 const MOVE_LABEL = { sell: 'Verkaufen', profit: 'Gewinn mitnehmen', reduce: 'Reduzieren', swap: 'Tauschen', buy: 'Kaufen', add: 'Nachkaufen' };
 const dateText = (d) => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
@@ -819,6 +840,7 @@ function portfolioView() {
     <h2>Mein Portfolio</h2>
     <p class="hint" id="p-where"></p>
     <section id="p-summary" class="summary"></section>
+    <div id="p-alloc"></div>
     <div id="p-manager"></div>
     <h2>Bestand</h2>
     <div class="table-wrap"><table>
@@ -876,7 +898,8 @@ function portfolioView() {
       if (!res.positions.length) throw new Error('In der Datei wurden keine Bestände gefunden.');
       message = `${res.positions.length} Positionen aus ${res.rows} Zeilen importiert${res.skipped ? `, ${res.skipped} Zeilen übersprungen` : ''}.`;
       e.target.reset();
-      store($('#p-replace').checked ? res.positions : res.positions.reduce(pf.add, copy()));
+      const fresh = res.positions.map((p) => ({ ...p, since: Date.now() }));
+      store($('#p-replace').checked ? fresh : fresh.reduce(pf.add, copy()));
     } catch (err) { say('Import fehlgeschlagen: ' + err.message); }
   });
 
@@ -892,7 +915,7 @@ function portfolioView() {
     if (!(amount > 0)) return say('Bitte eine Menge größer als 0 eingeben.');
     message = `${c.name} hinzugefügt.`;
     e.target.reset();
-    store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd' }));
+    store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd', since: Date.now(), peak: c.current_price }));
   });
 
   $('#p-cash').addEventListener('submit', (e) => {
@@ -930,6 +953,16 @@ function portfolioView() {
     store(result.positions, result.cash);
   });
 
+  // Höchster Kurs seit dem Kauf: gespeicherter Wert, aktueller Kurs und – wenn vorhanden – die Tageskurse seit dem Kaufdatum
+  function peakOf(pos, c) {
+    if (!c || !isNum(c.current_price) || c.analysis.stable) return null;
+    let peak = Math.max(pos.peak ?? 0, c.current_price);
+    if (c.ind && pos.since) {
+      for (let i = c.ind.n - 1; i >= 0 && c.ind.times[i] >= pos.since; i--) peak = Math.max(peak, c.ind.prices[i]);
+    }
+    return peak;
+  }
+
   const self = { update };
   let optionCount = -1;
 
@@ -951,8 +984,13 @@ function portfolioView() {
       const value = c ? pos.amount * c.current_price : null;
       const unit = isNum(pos.cost) ? pos.cost : null;
       const paid = unit === null ? null : unit * pos.amount;
-      return { pos, c, value, unit, paid, gain: value !== null && paid !== null ? value - paid : null };
+      return { pos, c, value, unit, paid, gain: value !== null && paid !== null ? value - paid : null, peak: peakOf(pos, c) };
     }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+
+    // Neues Hoch seit dem Kauf merken (Grundlage der Schutzregel) – gespeichert wird erst ab 1 % Unterschied
+    if (rows.some((r) => r.peak && r.peak > (r.pos.peak ?? 0) * 1.01)) {
+      return store(list.map((p) => { const r = rows.find((x) => x.pos === p); return r?.peak ? { ...p, peak: Math.max(p.peak ?? 0, r.peak) } : p; }));
+    }
 
     const cash = depot.data.cash;
     const coinsValue = rows.reduce((s, r) => s + (r.value ?? 0), 0);
@@ -995,7 +1033,27 @@ function portfolioView() {
       </tr>`;
     }).join('') : '<tr><td colspan="10" class="empty">Noch keine Positionen. Füge unten eine Position hinzu, trag eine Reserve ein oder importiere dein Portfolio.</td></tr>';
 
+    allocation(rows, cash, total);
     manager(rows, total);
+  }
+
+  // Verteilung des Portfolios als Balken: die größten Positionen einzeln, der Rest zusammengefasst
+  function allocation(rows, cash, total) {
+    const el = $('#p-alloc');
+    if (!(total > 0)) { el.innerHTML = ''; return; }
+    const parts = [];
+    let reserve = cash, other = 0;
+    rows.filter((r) => r.value > 0).forEach((r, i) => {
+      if (r.c.analysis.stable) reserve += r.value;
+      else if (parts.length < 6) parts.push({ name: r.c.name, value: r.value, color: ALLOC_COLORS[parts.length] });
+      else other += r.value;
+    });
+    if (other > 0) parts.push({ name: 'Weitere', value: other, color: 'var(--muted)' });
+    if (reserve > 0) parts.push({ name: 'Reserve', value: reserve, color: 'var(--line-strong)' });
+    el.innerHTML = `<section class="panel"><div class="label">Verteilung</div>
+      <div class="alloc" role="img" aria-label="Verteilung des Portfolios">${parts.map((p) => `<i style="width:${(p.value / total * 100).toFixed(2)}%;background:${p.color}" title="${esc(p.name)}"></i>`).join('')}</div>
+      <div class="alloc-legend">${parts.map((p) => `<span><i style="background:${p.color}"></i>${esc(p.name)} <b>${num(p.value / total * 100, 0)} %</b></span>`).join('')}</div>
+    </section>`;
   }
 
   function manager(rows, total) {
@@ -1008,7 +1066,7 @@ function portfolioView() {
       .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 12)
       .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis }));
     const p = plan({
-      holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
+      holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
       cash: depot.data.cash, candidates, regime: state.market?.regime,
     });
     lastPlan = p;
@@ -1041,11 +1099,12 @@ function portfolioView() {
       <details${open ? ' open' : ''}><summary>So arbeitet der Manager – und was er nicht kann</summary>
         <ul class="plain">
           <li><strong>Erst das Risiko:</strong> Die Marktphase bestimmt, wie viel investiert sein soll. Im Bärenmarkt bleibt der Großteil in Reserve.</li>
-          <li><strong>Verlierer raus, Gewinner laufen lassen:</strong> Verkaufssignale werden verkauft; bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
-          <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %), höchstens 8 Positionen.</li>
+          <li><strong>Verkaufen, wenn Kurse fallen:</strong> Verkaufssignale werden verkauft. Fällt ein Coin 25 % unter sein Hoch seit dem Kauf, greift die Schutzregel – unabhängig vom Score.</li>
+          <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
+          <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %, riskante Coins weniger), höchstens 8 Positionen.</li>
           <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
-          <li><strong>Rückrechnung 2018–2026 mit Gebühren, wöchentlich geprüft:</strong> rund +59 % pro Jahr bei einem größten zwischenzeitlichen Rückgang von 49 %. Bitcoin halten brachte im selben Zeitraum rund +38 % pro Jahr bei 77 % Rückgang.</li>
-          <li><strong>Grenzen:</strong> Die Rückrechnung enthält nur Coins, die es heute noch gibt, und ein Teil des Zeitraums diente zur Abstimmung der Regeln – die echten Ergebnisse werden schlechter sein. Nur jeder dritte Monat endete im Plus, der mittlere Monat lag bei 0 % (oft in Reserve), der beste bei +98 %. Kein einziger von 97 Monaten erreichte +100 %: Einen Manager, der verlässlich +100 % im Monat macht, gibt es nicht.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren, wöchentlich geprüft:</strong> im Durchschnitt rund +5 % pro Monat (rund +58 % pro Jahr) bei einem größten zwischenzeitlichen Rückgang von 52 %. Bitcoin halten brachte im selben Zeitraum rund +38 % pro Jahr bei 77 % Rückgang.</li>
+          <li><strong>Grenzen:</strong> Verluste lassen sich nicht ausschließen – nur jeder dritte Monat endete im Plus, der schlechteste lag bei −20 %, der beste bei +89 %. Getestet wurden auch engere Stops, tägliches Prüfen und weniger, größere Positionen: Keine Variante kam über rund 5 % im Monatsdurchschnitt. 50 % oder mehr pro Monat sind mit keiner ehrlichen Regel erreichbar. Die Rückrechnung enthält zudem nur Coins, die es heute noch gibt; echte Ergebnisse werden schlechter sein.</li>
           <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
         </ul>
       </details>
@@ -1064,7 +1123,7 @@ function route() {
   let id = arg;
   try { id = decodeURIComponent(arg ?? ''); } catch { /* fehlerhafte Adresse – unverändert verwenden */ }
   if (name === 'coin' && id) current = detailView(id);
-  else if (name === 'portfolio') current = portfolioView();
+  else if (name === 'portfolio') current = depot.user ? portfolioView() : accountView(true);
   else if (name === 'konto') current = accountView();
   else current = marketView();
   current.update();

@@ -11,7 +11,9 @@ export function normalise(data) {
     .filter((p) => p && Number.isFinite(p.amount) && p.amount > 0 && (p.id || p.symbol || p.name))
     .map((p) => ({ id: p.id ?? null, symbol: p.symbol ?? '', name: p.name ?? '', amount: p.amount,
       cost: Number.isFinite(p.cost) ? p.cost : null, costCur: 'usd',
-      ...(Number.isFinite(p.trimPrice) ? { trimPrice: p.trimPrice } : {}) }));
+      ...(Number.isFinite(p.trimPrice) ? { trimPrice: p.trimPrice } : {}),
+      ...(Number.isFinite(p.since) ? { since: p.since } : {}),
+      ...(Number.isFinite(p.peak) ? { peak: p.peak } : {}) }));
   return { positions, cash: Number.isFinite(data?.cash) && data.cash > 0 ? data.cash : 0 };
 }
 
@@ -40,6 +42,9 @@ export function add(list, pos) {
   old.cost = known ? (old.cost * old.amount + pos.cost * pos.amount) / total : (old.cost ?? pos.cost ?? null);
   old.costCur = old.costCur ?? pos.costCur;
   old.amount = total;
+  if (Number.isFinite(pos.peak)) old.peak = Math.max(old.peak ?? 0, pos.peak);
+  old.since = Math.min(old.since ?? Infinity, pos.since ?? Infinity);
+  if (!Number.isFinite(old.since)) delete old.since;
   return list;
 }
 

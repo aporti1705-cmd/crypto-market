@@ -21,6 +21,8 @@ export const DEFAULTS = {
   buyScore: 12,
   profitGain: 0.6,        // ab diesem Kursgewinn wird Gewinnmitnahme geprüft
   profitGainHigh: 1.5,
+  trailStop: 0.25,        // Verkauf, wenn der Kurs so weit unter sein Hoch seit dem Kauf fällt
+  stopLoss: null,         // Verkauf, wenn der Kurs so weit unter den Kaufpreis fällt
   profitRepeat: 1.3,      // erneute Gewinnmitnahme erst, wenn der Kurs seit der letzten um 30 % gestiegen ist
 };
 
@@ -71,6 +73,16 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
     c.adj = adjusted(c.analysis ?? {});
     c.target = signal(c) === 'sell' ? 0 : Math.min(c.value, cap(c));
     c.why = signal(c) === 'sell' ? 'signal' : c.value > cap(c) + minTrade ? 'cap' : null;
+  }
+
+  // 1b. Schutz bei fallenden Kursen: Fällt ein Coin deutlich unter sein Hoch seit dem Kauf oder unter den
+  // Kaufpreis, wird verkauft – unabhängig vom Score
+  for (const c of coins) {
+    if (c.target === 0) continue;
+    const fromPeak = c.peak ? c.price / c.peak - 1 : null;
+    const fromCost = c.cost ? c.price / c.cost - 1 : null;
+    if (o.trailStop && fromPeak !== null && fromPeak <= -o.trailStop) { c.target = 0; c.why = 'stop'; c.drop = fromPeak; c.dropFrom = 'seinem Hoch seit dem Kauf'; }
+    else if (o.stopLoss && fromCost !== null && fromCost <= -o.stopLoss) { c.target = 0; c.why = 'stop'; c.drop = fromCost; c.dropFrom = 'dem Kaufpreis'; }
   }
 
   // 2. Gewinne teilweise sichern, wenn der Kurs weit gelaufen und der Trend überdehnt oder das Signal weg ist
@@ -152,6 +164,11 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
         reason: `Verkaufssignal (Score ${fmt(score(c))}). ${factorHint(a)}`,
         horizon: 'In den nächsten Tagen umsetzen.', review: review(14),
         reviewText: 'Wieder einsteigen erst, wenn das Signal auf „Kaufen“ dreht.' });
+      else if (c.why === 'stop') moves.push({ ...base, type: 'sell', title: `${c.name} verkaufen`,
+        goal: 'Verlust begrenzen, bevor aus einem Rückgang ein großer Verlust wird.',
+        reason: `Der Kurs liegt ${Math.round(-c.drop * 100)} % unter ${c.dropFrom}. Ab dieser Schwelle greift die Schutzregel.`,
+        horizon: 'Zeitnah umsetzen.', review: review(14),
+        reviewText: 'Wieder einsteigen erst, wenn ein neues Kaufsignal steht und der Kurs sich gefangen hat.' });
       else if (c.why === 'profit') moves.push({ ...base, type: 'profit', title: `${c.name}: Gewinn teilweise mitnehmen`,
         goal: 'Einen Teil des Gewinns sichern, den Rest weiterlaufen lassen.',
         reason: `Die Position liegt ${fmt(c.gain * 100)} % im Plus, und ${signal(c) !== 'buy' ? 'das Kaufsignal ist nicht mehr da' : 'der langfristige Trend ist überdehnt'}.${c.cutForExposure ? ' Zusätzlich verlangt die Marktphase eine höhere Reserve.' : ''}`,
@@ -227,7 +244,8 @@ export function applyMove(positions, cash, move, { fee = DEFAULTS.fee, stableIds
   const buy = (target, usd, price) => {
     const units = usd * (1 - fee) / price;
     let p = find(target.id);
-    if (!p) { p = { id: target.id, symbol: target.symbol, name: target.name, amount: 0, cost: null, costCur: 'usd' }; list.push(p); }
+    if (!p) { p = { id: target.id, symbol: target.symbol, name: target.name, amount: 0, cost: null, costCur: 'usd', since: Date.now() }; list.push(p); }
+    p.peak = Math.max(p.peak ?? 0, price);
     // Durchschnittlicher Kaufpreis inklusive Gebühr
     p.cost = Number.isFinite(p.cost) && p.amount > 0 ? (p.cost * p.amount + usd) / (p.amount + units) : usd / units;
     p.amount += units;
