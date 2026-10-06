@@ -11,8 +11,9 @@ try {
   emulator = ['localhost', '127.0.0.1'].includes(location.hostname) && localStorage.getItem('krypto-markt-emulator') === '1';
 } catch {}
 
-const config = firebaseConfig ?? (emulator
-  ? { apiKey: 'demo-key', authDomain: 'demo-krypto.firebaseapp.com', projectId: 'demo-krypto' } : null);
+// Im Testbetrieb hat das Emulator-Projekt Vorrang, damit keine echten Konten entstehen
+const config = emulator
+  ? { apiKey: 'demo-key', authDomain: 'demo-krypto.firebaseapp.com', projectId: 'demo-krypto' } : firebaseConfig;
 
 export const available = !!config;
 
@@ -83,6 +84,6 @@ export async function watchPortfolio(uid, cb, onError) {
 
 export function savePortfolio(uid, data) {
   // Firestore lehnt undefined ab – der Umweg über JSON entfernt solche Felder
-  const clean = JSON.parse(JSON.stringify({ positions: data.positions, cash: data.cash, updated: Date.now() }));
+  const clean = JSON.parse(JSON.stringify({ positions: data.positions, cash: data.cash, reservePct: data.reservePct ?? null, updated: Date.now() }));
   return run(({ fs, db }) => fs.setDoc(fs.doc(db, 'portfolios', uid), clean));
 }

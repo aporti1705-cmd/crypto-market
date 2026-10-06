@@ -2,7 +2,7 @@ import { $, esc, settings, sleep, isNum, money, compact, num, signed, tone, pct 
 import * as api from './api.js';
 import * as pf from './portfolio.js';
 import * as auth from './auth.js';
-import { plan, applyMove, adjusted } from './manager.js';
+import { plan, applyMove, adjusted, exposureFor } from './manager.js';
 import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
@@ -27,6 +27,7 @@ const state = {
   daily: new Map(),     // Tageskurse je Coin-ID, sobald geladen
   news: new Map(),      // ausgewertete Nachrichten je Coin-ID
   refining: false,
+  refineDone: false,    // Hintergrund-Bewertung mindestens einmal abgeschlossen
   sort: { key: 'rank', dir: 1 }, page: 1, query: '', filter: 'all',
   gen: 0, nextPage: 1, pagesLoaded: 0, updated: null,
 };
@@ -131,7 +132,11 @@ async function loadPage(gen) {
 async function marketLoop() {
   const gen = ++state.gen;
   const age = restoreCache();
-  if (age < Infinity) { setStatus(null); current?.update(); }
+  if (age < Infinity) {
+    setStatus(null); current?.update();
+    // Auch mit Kursen aus dem Zwischenspeicher die Bewertungen verfeinern – sonst kämen bei gestörtem Kursabruf nie Vorschläge
+    if (state.pagesLoaded >= api.PAGES) refineAll();
+  }
   if (age < REFRESH_MS) await sleep(PAGE_INTERVAL_MS);
   while (gen === state.gen) {
     const ok = await loadPage(gen);
@@ -149,7 +154,7 @@ async function refineAll() {
   if (state.refining) return;
   // Jeden Coin nur einmal prüfen, sonst würde die Paarliste alle 30 Sekunden neu geladen
   const fresh = state.coins.filter((c) => !refineChecked.has(c.id) && !state.daily.has(c.id) && !c.analysis.stable);
-  if (!fresh.length) return;
+  if (!fresh.length) { state.refineDone = true; return; }
   state.refining = true;
   try {
     const prices = await api.binancePrices();
@@ -173,6 +178,8 @@ async function refineAll() {
     rebuild(); current?.update();
   } catch { /* Binance nicht erreichbar */ }
   state.refining = false;
+  state.refineDone = true;
+  current?.update();
 }
 
 async function fngLoop() {
@@ -833,98 +840,181 @@ const ALLOC_COLORS = ['var(--accent)', 'var(--violet)', 'var(--up)', '#38bdf8', 
 const MOVE_LABEL = { sell: 'Verkaufen', profit: 'Gewinn mitnehmen', reduce: 'Reduzieren', swap: 'Tauschen', buy: 'Kaufen', add: 'Nachkaufen' };
 const dateText = (d) => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
+// Zuletzt berechnete Vorschläge. Sie bleiben stehen, bis sich das Portfolio ändert oder neu berechnet wird –
+// laufende Kursänderungen verschieben sie nicht.
+let advice = null;
+const ADVICE_STALE_MS = 30 * 60_000;
+
 function portfolioView() {
   let message = '';
-  let lastPlan = null;
+  let imp = null;          // Import: eingelesene Tabelle und Spaltenzuordnung
+  let recalc = false;
   view.innerHTML = `
-    <h2>Mein Portfolio</h2>
-    <p class="hint" id="p-where"></p>
-    <section id="p-summary" class="summary"></section>
-    <div id="p-alloc"></div>
-    <div id="p-manager"></div>
-    <h2>Bestand</h2>
-    <div class="table-wrap"><table>
-      <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
-        <th class="num col-30d">Ø Kaufpreis</th><th class="num">Gewinn / Verlust</th><th class="col-score">Prognose</th><th>Signal</th><th></th></tr></thead>
-      <tbody id="p-rows"></tbody>
-    </table></div>
-    <p id="p-msg" class="notice" hidden></p>
-    <div class="two-col">
-      <section class="panel">
-        <h2>Position hinzufügen</h2>
-        <form id="p-add" class="form">
-          <label>Coin <input id="p-coin" list="coinlist" placeholder="z. B. Bitcoin oder BTC" required autocomplete="off"></label>
-          <datalist id="coinlist"></datalist>
-          <label>Menge <input id="p-amount" inputmode="decimal" placeholder="0,5" required></label>
-          <label>Kaufpreis je Coin in USD (optional) <input id="p-cost" inputmode="decimal"></label>
-          <button class="btn" type="submit">Hinzufügen</button>
-        </form>
-      </section>
-      <section class="panel">
-        <h2>Reserve</h2>
-        <p class="hint">Geld, das du zusätzlich investieren könntest (z. B. Guthaben auf der Börse). Stablecoins in deinem Bestand zählen automatisch zur Reserve.</p>
-        <form id="p-cash" class="form">
-          <label>Reserve in USD <input id="p-cash-value" inputmode="decimal" placeholder="0"></label>
-          <button class="btn" type="submit">Speichern</button>
-        </form>
-      </section>
+    <div class="page-head">
+      <div><h1 class="page-title">Mein Portfolio</h1><p class="hint" id="p-where"></p></div>
+      <div class="actions">
+        <button class="btn" id="p-open-add">+ Position</button>
+        <button class="btn ghost" id="p-open-import">Importieren</button>
+      </div>
     </div>
-    <section class="panel">
-      <h2>Aus CoinMarketCap importieren</h2>
-      <p class="hint">CoinMarketCap bietet keine Schnittstelle, über die eine andere Website dein Portfolio direkt abrufen darf.
-        Der Weg führt deshalb über eine Datei: Portfolio bei CoinMarketCap als CSV exportieren und hier auswählen. Erkannt werden
-        Bestände und Transaktionslisten mit Spalten für Coin (Name oder Kürzel), Menge und optional Kaufpreis in USD und Typ (Kauf/Verkauf).</p>
-      <form id="p-import" class="form">
-        <label>CSV-Datei <input type="file" id="p-file" accept=".csv,.txt,text/csv" required></label>
-        <label class="check"><input type="checkbox" id="p-replace" checked> Bestehende Positionen ersetzen</label>
-        <button class="btn" type="submit">Importieren</button>
+    <p id="p-msg" class="notice" hidden></p>
+    <div id="p-empty"></div>
+    <div id="p-body">
+      <section id="p-summary" class="summary"></section>
+      <div id="p-alloc"></div>
+      <section class="panel" id="p-reserve">
+        <div class="panel-top"><div><h2>Reserve</h2><div class="muted">Anteil, der nicht in Coins investiert sein soll</div></div><strong class="reserve-value" id="r-value"></strong></div>
+        <input type="range" id="r-slider" min="0" max="100" step="5" aria-label="Gewünschte Reserve in Prozent">
+        <div class="range-labels"><span>0 % · voll investiert</span><span>100 % · alles in Reserve</span></div>
+        <p class="hint" id="r-hint"></p>
+        <div class="reserve-row">
+          <button class="btn ghost small" id="r-auto" type="button">Vorschlag übernehmen</button>
+          <form id="p-cash" class="inline-form">
+            <label for="p-cash-value">Bargeld außerhalb der Coins (USD)</label>
+            <input id="p-cash-value" inputmode="decimal" placeholder="0">
+            <button class="btn ghost small" type="submit">Speichern</button>
+          </form>
+        </div>
+      </section>
+      <div id="p-manager"></div>
+      <h2>Bestand</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
+          <th class="num col-30d">Ø Kaufpreis</th><th class="num">Gewinn / Verlust</th><th class="col-score">Prognose</th><th>Signal</th><th></th></tr></thead>
+        <tbody id="p-rows"></tbody>
+      </table></div>
+      <p class="foot-actions"><button class="link" id="p-clear" type="button">Portfolio leeren</button></p>
+    </div>
+
+    <dialog id="dlg-add" class="dialog">
+      <form id="p-add" class="form" method="dialog">
+        <div class="dialog-top"><h2>Position hinzufügen</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
+        <label>Coin <input id="p-coin" list="coinlist" placeholder="z. B. Bitcoin oder BTC" required autocomplete="off"></label>
+        <datalist id="coinlist"></datalist>
+        <label>Menge <input id="p-amount" inputmode="decimal" placeholder="0,5" required></label>
+        <label>Kaufpreis je Coin in USD (optional) <input id="p-cost" inputmode="decimal" placeholder="für Gewinn und Verlust"></label>
+        <p id="p-add-msg" class="notice" hidden></p>
+        <div class="btn-row"><button class="btn" type="submit">Hinzufügen</button><button class="btn ghost" type="button" data-close>Abbrechen</button></div>
       </form>
-    </section>
-    <p><button class="btn ghost" id="p-clear">Portfolio leeren</button></p>`;
+    </dialog>
+
+    <dialog id="dlg-import" class="dialog wide">
+      <div class="dialog-top"><h2>Portfolio importieren</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
+      <div id="imp-body"></div>
+    </dialog>`;
 
   const say = (text) => { message = text; update(); };
   const copy = () => depot.data.positions.map((p) => ({ ...p }));
-  const store = (positions, cash = depot.data.cash) => saveDepot({ positions, cash });
+  const store = (positions, extra = {}) => saveDepot({ ...depot.data, positions, ...extra });
   const find = (pos) => (pos.id && state.byId.get(pos.id))
     || state.bySymbol.get((pos.symbol || pos.name || '').toLowerCase())
-    || state.byName.get((pos.name || pos.symbol || '').toLowerCase());
+    || state.byName.get((pos.name || pos.symbol || '').toLowerCase())
+    || state.bySymbol.get((pos.name || '').toLowerCase());
 
-  $('#p-import').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const file = $('#p-file').files[0];
-    if (!file) return;
-    try {
-      const res = pf.parseImport(await file.text(), 'usd');
-      if (!res.positions.length) throw new Error('In der Datei wurden keine Bestände gefunden.');
-      message = `${res.positions.length} Positionen aus ${res.rows} Zeilen importiert${res.skipped ? `, ${res.skipped} Zeilen übersprungen` : ''}.`;
-      e.target.reset();
-      const fresh = res.positions.map((p) => ({ ...p, since: Date.now() }));
-      store($('#p-replace').checked ? fresh : fresh.reduce(pf.add, copy()));
-    } catch (err) { say('Import fehlgeschlagen: ' + err.message); }
+  // ----- Dialoge -----
+  for (const d of view.querySelectorAll('dialog')) {
+    d.addEventListener('click', (e) => { if (e.target === d || e.target.closest('[data-close]')) d.close(); });
+  }
+  $('#p-open-add').addEventListener('click', () => { $('#p-add-msg').hidden = true; $('#dlg-add').showModal(); });
+  $('#p-open-import').addEventListener('click', () => { imp = null; renderImport(); $('#dlg-import').showModal(); });
+  view.addEventListener('click', (e) => {
+    if (e.target.closest('[data-open-add]')) $('#p-open-add').click();
+    if (e.target.closest('[data-open-import]')) $('#p-open-import').click();
   });
 
   $('#p-add').addEventListener('submit', (e) => {
     e.preventDefault();
+    const fail = (text) => { $('#p-add-msg').hidden = false; $('#p-add-msg').textContent = text; };
     const text = $('#p-coin').value.trim();
     const m = text.match(/^(.*)\(([^)]+)\)$/);
     const c = (m && state.coins.find((x) => x.name === m[1].trim() && x.symbol.toUpperCase() === m[2].trim().toUpperCase()))
       || find({ symbol: text, name: text });
     const amount = pf.parseNumber($('#p-amount').value);
     const cost = pf.parseNumber($('#p-cost').value);
-    if (!c) return say(`„${text}“ wurde unter den geladenen Coins nicht gefunden.`);
-    if (!(amount > 0)) return say('Bitte eine Menge größer als 0 eingeben.');
+    if (!c) return fail(`„${text}“ wurde unter den geladenen Coins nicht gefunden.`);
+    if (!(amount > 0)) return fail('Bitte eine Menge größer als 0 eingeben.');
     message = `${c.name} hinzugefügt.`;
     e.target.reset();
+    $('#dlg-add').close();
     store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd', since: Date.now(), peak: c.current_price }));
   });
 
+  // ----- Import in zwei Schritten: Datei wählen, dann Zuordnung prüfen -----
+  function renderImport(error = '') {
+    const el = $('#imp-body');
+    if (!imp) {
+      el.innerHTML = `
+        <p class="hint">Exportiere dein Portfolio bei CoinMarketCap als CSV-Datei und wähle sie hier aus. Es funktionieren auch Exporte anderer Anbieter –
+          im nächsten Schritt siehst du, was erkannt wurde, und kannst die Spalten selbst zuordnen.</p>
+        <div class="form">
+          <label>Datei (CSV oder Text) <input type="file" id="imp-file" accept=".csv,.tsv,.txt,text/csv,text/plain"></label>
+          <label>oder Inhalt hier einfügen <textarea id="imp-text" rows="4" placeholder="Kopfzeile und Zeilen aus der Datei"></textarea></label>
+          ${error ? `<p class="notice">${esc(error)}</p>` : ''}
+          <div class="btn-row"><button class="btn" id="imp-next" type="button">Weiter</button><button class="btn ghost" type="button" data-close>Abbrechen</button></div>
+        </div>`;
+      $('#imp-next').addEventListener('click', async () => {
+        try {
+          const file = $('#imp-file').files[0];
+          const text = file ? await pf.readFile(file) : $('#imp-text').value;
+          if (!text.trim()) return renderImport('Bitte eine Datei auswählen oder den Inhalt einfügen.');
+          imp = pf.parseTable(text);
+          renderImport();
+        } catch (err) { imp = null; renderImport('Die Datei konnte nicht gelesen werden: ' + err.message); }
+      });
+      return;
+    }
+
+    const option = (i, sel) => `<option value="${i}" ${sel === i ? 'selected' : ''}>${esc(imp.header[i] || `Spalte ${i + 1}`)}</option>`;
+    const result = pf.buildPositions(imp.rows, imp.columns);
+    const hasCoin = imp.columns.symbol !== undefined || imp.columns.name !== undefined;
+    const ok = hasCoin && imp.columns.amount !== undefined && result.positions.length > 0;
+    const found = result.positions.filter((p) => find(p)).length;
+    el.innerHTML = `
+      <p class="hint">${imp.rows.length} Zeilen gelesen. Prüfe, ob die Spalten richtig zugeordnet sind – Coin und Menge werden gebraucht, der Rest ist freiwillig.</p>
+      <div class="map-grid">${pf.ROLES.map(([role, label]) => `<label>${label}
+          <select data-role="${role}"><option value="">– keine –</option>${imp.header.map((_, i) => option(i, imp.columns[role])).join('')}</select></label>`).join('')}</div>
+      <h3>Erkannt</h3>
+      ${ok ? `<ul class="import-list">${result.positions.slice(0, 8).map((p) => {
+          const c = find(p);
+          return `<li><span class="tag ${c ? 'up' : 'down'}">${c ? 'gefunden' : 'unbekannt'}</span>
+            <span><strong>${esc(c?.name ?? p.name ?? p.symbol)}</strong> · ${p.amount.toLocaleString('de-DE', { maximumFractionDigits: 8 })} ${esc((c?.symbol ?? p.symbol ?? '').toUpperCase())}${p.cost ? ` · Ø ${money(p.cost)}` : ''}</span></li>`;
+        }).join('')}</ul>
+        <p class="hint">${result.positions.length} Positionen, davon ${found} unter den Top 1000 gefunden${result.positions.length > 8 ? ` (gezeigt: die ersten 8)` : ''}${result.skipped ? ` · ${result.skipped} Zeilen ohne Coin oder Menge übersprungen` : ''}.</p>`
+        : `<p class="notice">${!hasCoin || imp.columns.amount === undefined ? 'Bitte oben die Spalten für Coin und Menge auswählen.' : 'Mit dieser Zuordnung ergeben sich keine Bestände. Stimmt die Spalte für die Menge?'}</p>`}
+      <label class="check"><input type="checkbox" id="imp-replace" checked> Bestehende Positionen ersetzen</label>
+      <div class="btn-row"><button class="btn" id="imp-do" type="button" ${ok ? '' : 'disabled'}>Importieren</button><button class="btn ghost" id="imp-back" type="button">Zurück</button></div>`;
+    for (const sel of el.querySelectorAll('select[data-role]')) {
+      sel.addEventListener('change', () => {
+        if (sel.value === '') delete imp.columns[sel.dataset.role]; else imp.columns[sel.dataset.role] = Number(sel.value);
+        renderImport();
+      });
+    }
+    $('#imp-back').addEventListener('click', () => { imp = null; renderImport(); });
+    $('#imp-do').addEventListener('click', () => {
+      const fresh = result.positions.map((p) => ({ ...p, id: find(p)?.id ?? null, since: Date.now() }));
+      message = `${fresh.length} Positionen importiert.`;
+      const replace = $('#imp-replace').checked;
+      $('#dlg-import').close();
+      store(replace ? fresh : fresh.reduce(pf.add, copy()));
+    });
+  }
+
+  // ----- Reserve -----
+  const suggestedReserve = () => Math.round((1 - exposureFor(state.market?.regime).share) * 100);
+  $('#r-slider').addEventListener('input', (e) => { $('#r-value').textContent = `${e.target.value} %`; });
+  $('#r-slider').addEventListener('change', (e) => {
+    message = '';
+    saveDepot({ ...depot.data, reservePct: Number(e.target.value) });
+  });
+  $('#r-auto').addEventListener('click', () => { message = ''; saveDepot({ ...depot.data, reservePct: null }); });
   $('#p-cash').addEventListener('submit', (e) => {
     e.preventDefault();
     const raw = $('#p-cash-value').value.trim();
     const cash = raw ? pf.parseNumber(raw) : 0;
     if (!(cash >= 0)) return say('Bitte einen Betrag von 0 oder mehr eingeben.');
-    message = 'Reserve gespeichert.';
-    store(copy(), cash);
+    message = 'Bargeld gespeichert.';
+    $('#p-cash-value').blur();
+    saveDepot({ ...depot.data, cash });
   });
 
   $('#p-rows').addEventListener('click', (e) => {
@@ -934,23 +1024,21 @@ function portfolioView() {
     store(copy().filter((p) => pf.keyOf(p) !== key));
   });
 
-  $('#p-clear').addEventListener('click', () => {
-    message = 'Portfolio geleert.';
-    store([], 0);
-  });
+  $('#p-clear').addEventListener('click', () => { message = 'Portfolio geleert.'; saveDepot(pf.empty()); });
 
-  // Einen empfohlenen Schritt als ausgeführt eintragen: Mengen, Reserve und Kaufpreise werden angepasst
   $('#p-manager').addEventListener('click', (e) => {
+    if (e.target.closest('[data-recalc]')) { recalc = true; return update(); }
+    // Einen empfohlenen Schritt als ausgeführt eintragen: Mengen, Reserve und Kaufpreise werden angepasst
     const index = e.target.closest('[data-move]')?.dataset.move;
-    const move = lastPlan?.moves[index];
+    const move = advice?.plan.moves[index];
     if (!move) return;
     // Importierte Positionen kennen ihre Coin-ID noch nicht – hier wird sie ergänzt
     const withIds = copy().map((p) => ({ ...p, id: p.id ?? find(p)?.id ?? null }));
     const stableIds = withIds.filter((p) => state.byId.get(p.id)?.analysis.stable).map((p) => p.id);
     const result = applyMove(withIds, depot.data.cash, move, { stableIds });
-    if (!result) return say('Für diesen Kauf fehlt die Reserve. Trag zuerst die Verkäufe als umgesetzt ein oder erhöhe die Reserve.');
+    if (!result) return say('Für diesen Kauf fehlt die Reserve. Trag zuerst die Verkäufe als umgesetzt ein oder erhöhe das Bargeld.');
     message = `Eingetragen: ${move.title}.`;
-    store(result.positions, result.cash);
+    saveDepot({ ...depot.data, positions: result.positions, cash: result.cash });
   });
 
   // Höchster Kurs seit dem Kauf: gespeicherter Wert, aktueller Kurs und – wenn vorhanden – die Tageskurse seit dem Kaufdatum
@@ -970,14 +1058,19 @@ function portfolioView() {
     const list = depot.data.positions;
     $('#p-where').textContent = depot.sync === 'error' ? `Speichern im Konto fehlgeschlagen: ${depot.error}` : SYNC_TEXT[depot.sync];
     $('#p-msg').hidden = !message; $('#p-msg').textContent = message;
-    // Reserve-Feld mit dem gespeicherten Wert füllen, solange niemand gerade darin tippt
-    const cashInput = $('#p-cash-value');
-    if (document.activeElement !== cashInput) cashInput.value = depot.data.cash ? String(Math.round(depot.data.cash * 100) / 100).replace('.', ',') : '';
-    $('#p-clear').hidden = !list.length && !depot.data.cash;
     if (optionCount !== state.coins.length) {
       optionCount = state.coins.length;
       $('#coinlist').innerHTML = state.coins.map((c) => `<option value="${esc(c.name)} (${esc(c.symbol.toUpperCase())})">`).join('');
     }
+
+    const isEmpty = !list.length && !depot.data.cash;
+    $('#p-body').hidden = isEmpty;
+    $('#p-empty').innerHTML = isEmpty ? `<section class="panel empty-state">
+        <h2>Noch nichts im Portfolio</h2>
+        <p class="muted">Füge deine Coins hinzu oder importiere dein Portfolio. Danach siehst du Wert, Gewinn und konkrete Vorschläge.</p>
+        <div class="btn-row"><button class="btn" data-open-add>+ Position hinzufügen</button><button class="btn ghost" data-open-import>Importieren</button></div>
+      </section>` : '';
+    if (isEmpty) { advice = null; return; }
 
     const rows = list.map((pos) => {
       const c = find(pos);
@@ -993,8 +1086,7 @@ function portfolioView() {
     }
 
     const cash = depot.data.cash;
-    const coinsValue = rows.reduce((s, r) => s + (r.value ?? 0), 0);
-    const total = coinsValue + cash;
+    const total = rows.reduce((s, r) => s + (r.value ?? 0), 0) + cash;
     const stableValue = rows.filter((r) => r.c?.analysis.stable).reduce((s, r) => s + r.value, 0);
     const priced = rows.filter((r) => r.gain !== null);
     const paid = priced.reduce((s, r) => s + r.paid, 0);
@@ -1003,16 +1095,11 @@ function portfolioView() {
       const ch = r.c?.price_change_percentage_24h_in_currency;
       return s + (r.value !== null && isNum(ch) ? r.value - r.value / (1 + ch / 100) : 0);
     }, 0);
-    const scored = rows.filter((r) => r.c && isNum(r.c.analysis.score));
-    const weight = scored.reduce((s, r) => s + r.value, 0);
-    const score = weight ? scored.reduce((s, r) => s + r.c.analysis.score * r.value, 0) / weight : null;
 
-    const card = (label, value, sub = '') => `<div class="card"><div class="label">${label}</div><div class="value">${value}</div><div class="muted">${sub}</div></div>`;
-    $('#p-summary').innerHTML = total > 0 ? card('Gesamtwert', money(total), 'inklusive Reserve') +
-      card('Reserve', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios` : '') +
-      card('Veränderung 24 h', `<span class="${tone(day)}">${money(day)}</span>`, total - day > 0 ? pct(day / (total - day) * 100) : '') +
-      card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) + (priced.length < rows.length ? ' · nur Positionen mit Kaufpreis' : '') : '') +
-      card('Portfolio-Score', score === null ? '–' : `<span class="${tone(score)}">${signed(score, 0)}</span>`, 'nach Wert gewichtet') : '';
+    const card = (label, value, sub = '', cls = '') => `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}</div><div class="muted">${sub}</div></div>`;
+    $('#p-summary').innerHTML = card('Gesamtwert', money(total), `heute ${pct(total - day > 0 ? day / (total - day) * 100 : 0)} (${money(day)})`, 'main') +
+      card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) : 'Kaufpreise fehlen') +
+      card('Reserve', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios` : '');
 
     $('#p-rows').innerHTML = rows.length ? rows.map(({ pos, c, value, unit, paid: p, gain: g }) => {
       const a = c?.analysis;
@@ -1031,10 +1118,26 @@ function portfolioView() {
         <td>${a ? badge(a) : '–'}</td>
         <td><button class="icon" data-remove="${esc(pf.keyOf(pos))}" title="Position entfernen" aria-label="Position entfernen">✕</button></td>
       </tr>`;
-    }).join('') : '<tr><td colspan="10" class="empty">Noch keine Positionen. Füge unten eine Position hinzu, trag eine Reserve ein oder importiere dein Portfolio.</td></tr>';
+    }).join('') : '<tr><td colspan="10" class="empty">Noch keine Coins – nur Bargeld. Mit „+ Position“ fügst du Coins hinzu.</td></tr>';
 
     allocation(rows, cash, total);
+    reserve();
     manager(rows, total);
+  }
+
+  function reserve() {
+    const suggested = suggestedReserve();
+    const chosen = depot.data.reservePct;
+    const value = chosen ?? suggested;
+    const slider = $('#r-slider');
+    if (document.activeElement !== slider) { slider.value = value; $('#r-value').textContent = `${value} %`; }
+    $('#r-hint').innerHTML = state.market
+      ? `Vorschlag für die aktuelle Marktphase: <strong>${suggested} %</strong>. ${esc(exposureFor(state.market.regime).text)}
+         ${chosen === null ? 'Du folgst dem Vorschlag.' : `Du hast <strong>${chosen} %</strong> gewählt – die Vorschläge unten richten sich danach.`}`
+      : 'Der Vorschlag wird berechnet …';
+    $('#r-auto').hidden = chosen === null;
+    const cashInput = $('#p-cash-value');
+    if (document.activeElement !== cashInput) cashInput.value = depot.data.cash ? String(Math.round(depot.data.cash * 100) / 100).replace('.', ',') : '';
   }
 
   // Verteilung des Portfolios als Balken: die größten Positionen einzeln, der Rest zusammengefasst
@@ -1042,14 +1145,14 @@ function portfolioView() {
     const el = $('#p-alloc');
     if (!(total > 0)) { el.innerHTML = ''; return; }
     const parts = [];
-    let reserve = cash, other = 0;
-    rows.filter((r) => r.value > 0).forEach((r, i) => {
-      if (r.c.analysis.stable) reserve += r.value;
+    let reserveValue = cash, other = 0;
+    for (const r of rows.filter((x) => x.value > 0)) {
+      if (r.c.analysis.stable) reserveValue += r.value;
       else if (parts.length < 6) parts.push({ name: r.c.name, value: r.value, color: ALLOC_COLORS[parts.length] });
       else other += r.value;
-    });
+    }
     if (other > 0) parts.push({ name: 'Weitere', value: other, color: 'var(--muted)' });
-    if (reserve > 0) parts.push({ name: 'Reserve', value: reserve, color: 'var(--line-strong)' });
+    if (reserveValue > 0) parts.push({ name: 'Reserve', value: reserveValue, color: 'var(--line-strong)' });
     el.innerHTML = `<section class="panel"><div class="label">Verteilung</div>
       <div class="alloc" role="img" aria-label="Verteilung des Portfolios">${parts.map((p) => `<i style="width:${(p.value / total * 100).toFixed(2)}%;background:${p.color}" title="${esc(p.name)}"></i>`).join('')}</div>
       <div class="alloc-legend">${parts.map((p) => `<span><i style="background:${p.color}"></i>${esc(p.name)} <b>${num(p.value / total * 100, 0)} %</b></span>`).join('')}</div>
@@ -1058,23 +1161,36 @@ function portfolioView() {
 
   function manager(rows, total) {
     const el = $('#p-manager');
-    if (!(total > 0)) { lastPlan = null; el.innerHTML = ''; return; }
-    const known = rows.filter((r) => r.c && isNum(r.c.current_price));
-    const held = new Set(known.map((r) => r.c.id));
-    const candidates = state.coins.filter((c) => c.analysis.signal === 'buy' && !held.has(c.id) &&
-      (c.market_cap_rank ?? 9999) <= 300 && c.total_volume >= 5e6 && !DERIVATIVE.test(c.name))
-      .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 12)
-      .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis }));
-    const p = plan({
-      holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
-      cash: depot.data.cash, candidates, regime: state.market?.regime,
-    });
-    lastPlan = p;
-    if (!p) { el.innerHTML = ''; return; }
-    const open = !!$('details', el)?.open;   // aufgeklappte Erklärung beim Neuzeichnen offen lassen
+    if (!(total > 0)) { advice = null; el.innerHTML = ''; return; }
+    // Vorschläge erst zeigen, wenn alle Kurse und Bewertungen geladen sind – vorher würden sie sich ständig ändern
+    const ready = state.pagesLoaded >= api.PAGES && state.refineDone && !!state.market;
+    const key = JSON.stringify([depot.data.positions.map((p) => [pf.keyOf(p), p.amount, p.cost]), depot.data.cash, depot.data.reservePct]);
 
-    const loading = state.pagesLoaded < api.PAGES || state.refining;
-    const missing = rows.length - known.length;
+    if (ready && (!advice || advice.key !== key || recalc)) {
+      recalc = false;
+      const known = rows.filter((r) => r.c && isNum(r.c.current_price));
+      const held = new Set(known.map((r) => r.c.id));
+      const candidates = state.coins.filter((c) => c.analysis.signal === 'buy' && !held.has(c.id) &&
+        (c.market_cap_rank ?? 9999) <= 300 && c.total_volume >= 5e6 && !DERIVATIVE.test(c.name))
+        .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 12)
+        .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis }));
+      const p = plan({
+        holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
+        cash: depot.data.cash, candidates, regime: state.market.regime,
+        options: depot.data.reservePct === null ? {} : { investShare: 1 - depot.data.reservePct / 100 },
+      });
+      advice = p ? { key, plan: p, time: new Date(), missing: rows.length - known.length } : null;
+    }
+
+    if (!advice || advice.key !== key) {
+      el.innerHTML = `<section class="panel manager"><h2>Vorschläge</h2>
+        <p class="loading"><span class="spinner" aria-hidden="true"></span> Die Vorschläge werden berechnet. Dafür lädt die Seite erst alle Kurse und Bewertungen – das dauert nach dem Öffnen etwa eine Minute.</p></section>`;
+      return;
+    }
+
+    const p = advice.plan;
+    const open = !!$('details', el)?.open;
+    const stale = Date.now() - advice.time > ADVICE_STALE_MS;
     const amount = (m) => `${m.units.toLocaleString('de-DE', { maximumSignificantDigits: 4 })} ${esc(m.symbol.toUpperCase())}`;
     const cards = p.moves.map((m, i) => `<article class="move ${m.type}">
         <div class="move-top"><span class="move-type">${MOVE_LABEL[m.type]}</span><h3>${esc(m.title)}</h3><strong>${money(m.usd)}</strong></div>
@@ -1089,22 +1205,22 @@ function portfolioView() {
     const holds = p.holds.length ? `<p><strong>Halten:</strong> ${p.holds.map((h) => `${esc(h.name)} (${signed(h.score, 0)})`).join(', ')} – hier lohnt im Moment kein Handel.</p>` : '';
 
     el.innerHTML = `<section class="panel manager">
-      <div class="panel-top"><h2>Empfohlene Schritte</h2><span class="muted">Berechnet um ${new Date().toLocaleTimeString('de-DE')}</span></div>
+      <div class="panel-top"><div><h2>Vorschläge</h2><div class="muted">Stand ${advice.time.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr${stale ? ' – älter als 30 Minuten' : ''}</div></div>
+        <button class="btn ghost small" data-recalc>Neu berechnen</button></div>
       <p>${esc(p.exposure.text)} Investiert sind ${num(p.investedShare * 100, 0)} %, das Ziel liegt bei ${num(p.targetShare * 100, 0)} %.
         ${p.moves.length ? `Gebühren für alle Schritte zusammen: rund ${money(p.fees)}.` : ''}</p>
-      ${loading ? '<p class="notice">Die Bewertungen werden noch geladen – die Schritte können sich gleich noch ändern.</p>' : ''}
-      ${missing ? `<p class="notice">${missing} Position(en) ohne Kurs sind nicht berücksichtigt.</p>` : ''}
-      ${cards || '<p><strong>Im Moment kein Handlungsbedarf.</strong> Dein Portfolio passt zur Marktlage; jeder Handel würde nur Gebühren kosten.</p>'}
+      ${advice.missing ? `<p class="notice">${advice.missing} Position(en) ohne Kurs sind nicht berücksichtigt.</p>` : ''}
+      ${cards || '<p><strong>Im Moment kein Handlungsbedarf.</strong> Dein Portfolio passt zur gewählten Reserve und zur Marktlage; jeder Handel würde nur Gebühren kosten.</p>'}
       ${holds}
       <details${open ? ' open' : ''}><summary>So arbeitet der Manager – und was er nicht kann</summary>
         <ul class="plain">
-          <li><strong>Erst das Risiko:</strong> Die Marktphase bestimmt, wie viel investiert sein soll. Im Bärenmarkt bleibt der Großteil in Reserve.</li>
+          <li><strong>Feste Vorschläge:</strong> Sie werden einmal berechnet und bleiben stehen, bis du etwas am Portfolio änderst oder „Neu berechnen“ wählst.</li>
+          <li><strong>Erst das Risiko:</strong> Die Reserve bestimmt, wie viel investiert sein soll. Der Vorschlag dafür kommt aus der Marktphase; du kannst ihn überschreiben.</li>
           <li><strong>Verkaufen, wenn Kurse fallen:</strong> Verkaufssignale werden verkauft. Fällt ein Coin 25 % unter sein Hoch seit dem Kauf, greift die Schutzregel – unabhängig vom Score.</li>
           <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
           <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %, riskante Coins weniger), höchstens 8 Positionen.</li>
           <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
-          <li><strong>Rückrechnung 2018–2026 mit Gebühren, wöchentlich geprüft:</strong> im Durchschnitt rund +5 % pro Monat (rund +58 % pro Jahr) bei einem größten zwischenzeitlichen Rückgang von 52 %. Bitcoin halten brachte im selben Zeitraum rund +38 % pro Jahr bei 77 % Rückgang.</li>
-          <li><strong>Grenzen:</strong> Verluste lassen sich nicht ausschließen – nur jeder dritte Monat endete im Plus, der schlechteste lag bei −20 %, der beste bei +89 %. Getestet wurden auch engere Stops, tägliches Prüfen und weniger, größere Positionen: Keine Variante kam über rund 5 % im Monatsdurchschnitt. 50 % oder mehr pro Monat sind mit keiner ehrlichen Regel erreichbar. Die Rückrechnung enthält zudem nur Coins, die es heute noch gibt; echte Ergebnisse werden schlechter sein.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> im Durchschnitt rund +5 % pro Monat bei einem größten zwischenzeitlichen Rückgang von 52 % – mit der vorgeschlagenen Reserve. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
           <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
         </ul>
       </details>

@@ -61,7 +61,12 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   const total = reserve + invested;
   if (!(total > 0)) return null;
 
-  const exposure = exposureFor(regime);
+  // Vorschlag aus der Marktphase; eine selbst gewählte Reserve hat Vorrang
+  const suggested = exposureFor(regime);
+  const exposure = Number.isFinite(o.investShare)
+    ? { share: Math.min(1, Math.max(0, o.investShare)), custom: true,
+      text: `Du hast eine Reserve von ${Math.round((1 - o.investShare) * 100)} % gewählt (Vorschlag: ${Math.round((1 - suggested.share) * 100)} %).` }
+    : suggested;
   const budget = total * exposure.share;
   const cap = (c) => total * (CORE.has(c.id) ? o.maxWeightCore : o.maxWeight * RISK_CAP[c.analysis?.risk?.level ?? 2]);
   const minTrade = Math.max(o.minTradeUsd, total * o.minTradeShare);
@@ -199,7 +204,7 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   const fees = moves.reduce((s, m) => s + m.fee, 0);
   const targetInvested = all.reduce((s, c) => s + c.target, 0);
   return {
-    total, reserve, invested, exposure, minTrade,
+    total, reserve, invested, exposure, suggested, minTrade,
     investedShare: invested / total, targetShare: targetInvested / total,
     moves, fees, targets: all.map((c) => ({ id: c.id, target: c.target, value: c.value })),
     holds: coins.filter((c) => c.target === c.value && c.value > 0).map((c) => ({ id: c.id, name: c.name, score: score(c), signal: signal(c) })),

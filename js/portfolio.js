@@ -1,9 +1,9 @@
-// Portfolio: Speicherung im Browser und CSV-Import (z. B. Export aus CoinMarketCap)
+// Portfolio: Speicherung im Browser und Import aus Tabellen-Dateien (z. B. Export aus CoinMarketCap)
 
 const KEY = 'krypto-markt-depot';
 const LEGACY_KEY = 'krypto-markt-portfolio';   // frühere Version: nur die Liste der Positionen
 
-export const empty = () => ({ positions: [], cash: 0 });
+export const empty = () => ({ positions: [], cash: 0, reservePct: null });
 
 // Macht aus beliebigen gespeicherten Daten ein gültiges Portfolio
 export function normalise(data) {
@@ -14,7 +14,10 @@ export function normalise(data) {
       ...(Number.isFinite(p.trimPrice) ? { trimPrice: p.trimPrice } : {}),
       ...(Number.isFinite(p.since) ? { since: p.since } : {}),
       ...(Number.isFinite(p.peak) ? { peak: p.peak } : {}) }));
-  return { positions, cash: Number.isFinite(data?.cash) && data.cash > 0 ? data.cash : 0 };
+  const pct = data?.reservePct;
+  return { positions, cash: Number.isFinite(data?.cash) && data.cash > 0 ? data.cash : 0,
+    // Gewünschte Reserve in Prozent; null bedeutet: dem Vorschlag der Seite folgen
+    reservePct: Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null };
 }
 
 export function load() {
@@ -38,9 +41,8 @@ export function add(list, pos) {
   const old = list.find((p) => keyOf(p) === keyOf(pos));
   if (!old) return [...list, pos];
   const total = old.amount + pos.amount;
-  const known = Number.isFinite(old.cost) && Number.isFinite(pos.cost) && old.costCur === pos.costCur;
+  const known = Number.isFinite(old.cost) && Number.isFinite(pos.cost);
   old.cost = known ? (old.cost * old.amount + pos.cost * pos.amount) / total : (old.cost ?? pos.cost ?? null);
-  old.costCur = old.costCur ?? pos.costCur;
   old.amount = total;
   if (Number.isFinite(pos.peak)) old.peak = Math.max(old.peak ?? 0, pos.peak);
   old.since = Math.min(old.since ?? Infinity, pos.since ?? Infinity);
@@ -58,11 +60,23 @@ export function parseNumber(value) {
   return Number(s);
 }
 
+// ---------- Import ----------
+
+// Liest eine Datei als Text. Manche Exporte sind UTF-16 statt UTF-8 kodiert.
+export async function readFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const utf16le = bytes[0] === 0xff && bytes[1] === 0xfe, utf16be = bytes[0] === 0xfe && bytes[1] === 0xff;
+  // Ohne Kennung: viele Nullbytes an jeder zweiten Stelle sprechen für UTF-16
+  const zeros = bytes.slice(0, 200).filter((b, i) => i % 2 === 1 && b === 0).length;
+  const encoding = utf16be ? 'utf-16be' : utf16le || zeros > 40 ? 'utf-16le' : 'utf-8';
+  return new TextDecoder(encoding).decode(bytes);
+}
+
 function parseCsv(text) {
   text = text.replace(/^﻿/, '');
-  const first = text.split(/\r?\n/, 1)[0];
-  const count = (ch) => first.split(ch).length;
-  const delim = [',', ';', '\t'].sort((a, b) => count(b) - count(a))[0];
+  const sample = text.split(/\r?\n/).slice(0, 10).join('\n');
+  const count = (ch) => sample.split(ch).length;
+  const delim = [',', ';', '\t', '|'].sort((a, b) => count(b) - count(a))[0];
 
   const rows = [];
   let row = [], cell = '', quoted = false;
@@ -83,67 +97,85 @@ function parseCsv(text) {
   }
   row.push(cell);
   if (row.some((c) => c.trim())) rows.push(row);
-  return rows;
+  return rows.map((r) => r.map((c) => c.trim()));
 }
 
-// Mögliche Spaltennamen, in Reihenfolge der Priorität
+// Mögliche Spaltennamen je Rolle, in Reihenfolge der Priorität
 const COLUMNS = {
-  symbol: ['symbol', 'ticker', 'coinsymbol', 'asset', 'currency', 'coin', 'token', 'kuerzel'],
-  name: ['name', 'coinname', 'assetname', 'cryptocurrency', 'coin'],
-  amount: ['amount', 'quantity', 'holdings', 'balance', 'qty', 'units', 'anzahl', 'menge'],
-  price: ['price', 'buyprice', 'avgbuyprice', 'averagebuyprice', 'pricepercoin', 'avgprice', 'costperunit', 'kaufpreis', 'preis'],
-  total: ['total', 'totalspent', 'totalcost', 'costbasis', 'cost'],
-  type: ['type', 'transactiontype', 'side', 'action', 'typ'],
+  symbol: ['symbol', 'ticker', 'coinsymbol', 'tokensymbol', 'asset', 'token', 'tokens', 'currency', 'coin', 'base', 'pair', 'market', 'kuerzel', 'waehrung'],
+  name: ['name', 'coinname', 'tokenname', 'assetname', 'cryptocurrency', 'crypto', 'coin', 'token'],
+  amount: ['amount', 'quantity', 'holdings', 'balance', 'qty', 'units', 'size', 'tokenamount', 'coinamount', 'anzahl', 'menge', 'bestand'],
+  price: ['price', 'buyprice', 'avgbuyprice', 'averagebuyprice', 'pricepercoin', 'avgprice', 'costperunit', 'unitprice', 'rate', 'kaufpreis', 'preis', 'kurs'],
+  total: ['total', 'totalspent', 'totalcost', 'totalvalue', 'costbasis', 'cost', 'spent', 'gesamt'],
+  type: ['type', 'transactiontype', 'side', 'action', 'direction', 'typ', 'art'],
 };
 
-function findColumns(header) {
-  const norm = header.map((h) => h.toLowerCase().replace(/[^a-z]/g, ''));
+export const ROLES = [
+  ['symbol', 'Coin (Kürzel)'], ['name', 'Coin (Name)'], ['amount', 'Menge'],
+  ['price', 'Kaufpreis je Coin (USD)'], ['total', 'Gesamtbetrag (USD)'], ['type', 'Typ (Kauf/Verkauf)'],
+];
+
+const norm = (h) => h.toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/\(.*?\)/g, '').replace(/[^a-z]/g, '');
+
+function guessColumns(header) {
+  const names = header.map(norm);
   const cols = {};
   const used = new Set();
-  for (const [field, names] of Object.entries(COLUMNS)) {
+  for (const [role, candidates] of Object.entries(COLUMNS)) {
     let idx = -1;
-    for (const n of names) {
-      idx = norm.findIndex((h, i) => h === n && !used.has(i));
-      if (idx > -1) break;
-    }
+    for (const n of candidates) { idx = names.findIndex((h, i) => h === n && !used.has(i)); if (idx > -1) break; }
     if (idx === -1) {
-      for (const n of names) {
-        idx = norm.findIndex((h, i) => h.includes(n) && !used.has(i));
-        if (idx > -1) break;
-      }
+      for (const n of candidates) { idx = names.findIndex((h, i) => h.includes(n) && !used.has(i)); if (idx > -1) break; }
     }
-    if (idx > -1) { cols[field] = idx; used.add(idx); }
+    if (idx > -1) { cols[role] = idx; used.add(idx); }
   }
   return cols;
 }
 
-// Liest Bestände oder Transaktionen und fasst sie je Coin zusammen
-export function parseImport(text, costCur) {
+// Zerlegt den Text in Kopfzeile und Datenzeilen. Die Kopfzeile ist die erste Zeile (unter den ersten 15),
+// in der sich Spalten für Coin und Menge erkennen lassen – manche Exporte beginnen mit Titelzeilen.
+export function parseTable(text) {
   const rows = parseCsv(text);
   if (rows.length < 2) throw new Error('Die Datei enthält keine Datenzeilen.');
-  const cols = findColumns(rows[0]);
-  if (cols.amount === undefined || (cols.symbol === undefined && cols.name === undefined)) {
-    throw new Error(`Spalten für Coin und Menge nicht gefunden. Erkannte Kopfzeile: ${rows[0].join(' | ')}`);
-  }
+  let head = 0, best = -1;
+  rows.slice(0, 15).forEach((r, i) => {
+    const g = guessColumns(r);
+    const score = Object.keys(g).length + (g.amount !== undefined && (g.symbol !== undefined || g.name !== undefined) ? 10 : 0);
+    if (score > best) { best = score; head = i; }
+  });
+  return { header: rows[head], rows: rows.slice(head + 1), columns: guessColumns(rows[head]) };
+}
 
+// "Bitcoin (BTC)" → Name und Kürzel; "BTC/USDT" oder "BTC-USD" → BTC
+function splitCoin(text) {
+  const m = text.match(/^(.+?)\s*\(([A-Za-z0-9$.]{1,12})\)$/);
+  if (m) return { name: m[1].trim(), symbol: m[2].trim() };
+  const pair = text.match(/^([A-Za-z0-9$.]{1,12})\s*[/\-_]\s*(USDT|USDC|USD|EUR|BUSD|BTC|ETH)$/i);
+  return pair ? { symbol: pair[1] } : null;
+}
+
+// Fasst Bestände oder Transaktionen je Coin zusammen. columns: { rolle: spaltenindex }
+export function buildPositions(rows, columns) {
   const map = new Map();
   let skipped = 0;
-  for (const row of rows.slice(1)) {
-    const get = (f) => (cols[f] === undefined ? '' : (row[cols[f]] ?? '').trim());
-    const symbol = get('symbol'), name = get('name');
+  for (const row of rows) {
+    const get = (f) => (columns[f] === undefined || columns[f] === null ? '' : (row[columns[f]] ?? '').trim());
+    let symbol = get('symbol'), name = get('name');
+    const split = splitCoin(symbol) ?? splitCoin(name);
+    if (split) { symbol = split.symbol ?? symbol; name = split.name ?? name; }
     let amount = parseNumber(get('amount'));
     if ((!symbol && !name) || !Number.isFinite(amount) || amount === 0) { skipped++; continue; }
 
-    const sell = amount < 0 || /sell|verkauf|out|withdraw|send/i.test(get('type'));
+    const sell = amount < 0 || /sell|sold|verkauf|out|withdraw|send|sent/i.test(get('type'));
     amount = Math.abs(amount);
     let price = parseNumber(get('price'));
     if (!Number.isFinite(price) || price <= 0) {
-      const total = parseNumber(get('total'));
+      const total = Math.abs(parseNumber(get('total')));
       price = Number.isFinite(total) && total > 0 ? total / amount : NaN;
     }
 
     const key = (symbol || name).toLowerCase();
-    const pos = map.get(key) ?? { symbol, name, amount: 0, cost: null, costCur, bought: 0, spent: 0 };
+    const pos = map.get(key) ?? { symbol, name, amount: 0, bought: 0, spent: 0 };
     if (sell) pos.amount -= amount;
     else {
       pos.amount += amount;
@@ -151,9 +183,8 @@ export function parseImport(text, costCur) {
     }
     map.set(key, pos);
   }
-
   const positions = [...map.values()].filter((p) => p.amount > 1e-12).map(({ bought, spent, ...p }) => ({
-    ...p, cost: bought > 0 ? spent / bought : null,
+    ...p, cost: bought > 0 ? spent / bought : null, costCur: 'usd',
   }));
-  return { positions, rows: rows.length - 1, skipped };
+  return { positions, rows: rows.length, skipped };
 }
