@@ -982,6 +982,25 @@ function portfolioView() {
       </form>
     </dialog>
 
+    <dialog id="dlg-edit" class="dialog">
+      <form id="p-edit" class="form" method="dialog">
+        <div class="dialog-top"><h2 id="e-title">Position ändern</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
+        <div class="chips" id="e-actions" role="group" aria-label="Was möchtest du tun?">
+          <button type="button" class="chip active" data-action="swap">Tauschen</button>
+          <button type="button" class="chip" data-action="sell">Verkaufen</button>
+          <button type="button" class="chip" data-action="remove">Entfernen</button>
+        </div>
+        <p class="hint" id="e-help"></p>
+        <label>Menge <span id="e-have"></span>
+          <span class="input-row"><input id="e-amount" inputmode="decimal" required><button class="btn ghost small" type="button" id="e-all">Alles</button></span></label>
+        <label id="e-target-row">Tauschen in <input id="e-target" list="coinlist" placeholder="z. B. Ethereum oder ETH" autocomplete="off"></label>
+        <label class="check" id="e-fee-row"><input type="checkbox" id="e-fee" checked> Gebühr von 0,25 % je Kauf und Verkauf abziehen</label>
+        <p id="e-preview" class="preview"></p>
+        <p id="e-msg" class="notice" hidden></p>
+        <div class="btn-row"><button class="btn" type="submit" id="e-submit">Tauschen</button><button class="btn ghost" type="button" data-close>Abbrechen</button></div>
+      </form>
+    </dialog>
+
     <dialog id="dlg-reserve" class="dialog">
       <div>
         <div class="dialog-top"><h2>Reserve-Ziel</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
@@ -1123,11 +1142,107 @@ function portfolioView() {
     saveDepot({ ...depot.data, cash });
   });
 
+  // ----- Position ändern: tauschen, verkaufen oder entfernen -----
+  const EDIT = {
+    swap: { button: 'Tauschen', help: 'Tauscht die Menge in einen anderen Coin. Der neue Coin bekommt den Gegenwert als Kaufpreis.' },
+    sell: { button: 'Verkaufen', help: 'Verkauft die Menge zum aktuellen Kurs. Der Erlös wird deinem Bargeld gutgeschrieben.' },
+    remove: { button: 'Entfernen', help: 'Nimmt die Menge aus dem Portfolio, ohne etwas zu verbuchen – z. B. um einen Eintrag zu korrigieren.' },
+  };
+  let edit = null;   // { key, action }
+
+  const resolveCoin = (text) => {
+    const m = text.match(/^(.*)\(([^)]+)\)$/);
+    return (m && state.coins.find((x) => x.name === m[1].trim() && x.symbol.toUpperCase() === m[2].trim().toUpperCase()))
+      || find({ symbol: text, name: text });
+  };
+
+  // Rechnet aus den Eingaben, was passieren würde; error ist gesetzt, wenn noch etwas fehlt
+  function editPlan() {
+    const pos = depot.data.positions.find((p) => pf.keyOf(p) === edit.key);
+    if (!pos) return { error: 'Diese Position gibt es nicht mehr.' };
+    const c = find(pos);
+    const units = pf.parseNumber($('#e-amount').value);
+    if (!(units > 0)) return { pos, c, error: 'Bitte eine Menge größer als 0 eingeben.' };
+    if (units > pos.amount * 1.0000001) return { pos, c, error: `Du hast nur ${pos.amount.toLocaleString('de-DE', { maximumFractionDigits: 8 })}.` };
+    const amount = Math.min(units, pos.amount);
+    if (edit.action === 'remove') return { pos, c, amount };
+    if (!c || !isNum(c.current_price)) return { pos, c, error: 'Für diesen Coin gibt es keinen Kurs – er lässt sich nur entfernen.' };
+    const fee = $('#e-fee').checked ? 0.0025 : 0;
+    const usd = amount * c.current_price;
+    if (edit.action === 'sell') return { pos, c, amount, fee, usd, proceeds: usd * (1 - fee) };
+    const text = $('#e-target').value.trim();
+    if (!text) return { pos, c, amount, fee, usd, error: 'Bitte den Coin angeben, in den getauscht werden soll.' };
+    const to = resolveCoin(text);
+    if (!to) return { pos, c, error: `„${text}“ wurde unter den geladenen Coins nicht gefunden.` };
+    if (to.id === c.id) return { pos, c, error: 'Bitte einen anderen Coin wählen.' };
+    return { pos, c, amount, fee, usd, to, toUnits: usd * (1 - fee) * (1 - fee) / to.current_price };
+  }
+
+  function renderEdit(showError = false) {
+    const p = editPlan();
+    const sym = (p.c?.symbol ?? p.pos?.symbol ?? '').toUpperCase();
+    for (const b of $('#e-actions').children) b.classList.toggle('active', b.dataset.action === edit.action);
+    $('#e-title').textContent = `${p.c?.name ?? p.pos?.name ?? p.pos?.symbol ?? 'Position'} ändern`;
+    $('#e-help').textContent = EDIT[edit.action].help;
+    $('#e-have').textContent = p.pos ? `(vorhanden: ${p.pos.amount.toLocaleString('de-DE', { maximumFractionDigits: 8 })} ${sym})` : '';
+    $('#e-target-row').hidden = edit.action !== 'swap';
+    $('#e-fee-row').hidden = edit.action === 'remove';
+    $('#e-submit').textContent = EDIT[edit.action].button;
+    const units = (v) => v.toLocaleString('de-DE', { maximumSignificantDigits: 6 });
+    $('#e-preview').innerHTML = p.error ? ''
+      : edit.action === 'swap' ? `${units(p.amount)} ${esc(sym)} (${money(p.usd)}) → rund <strong>${units(p.toUnits)} ${esc(p.to.symbol.toUpperCase())}</strong>${p.fee ? ` · Gebühr rund ${money(p.usd * p.fee * 2)}` : ''}`
+        : edit.action === 'sell' ? `${units(p.amount)} ${esc(sym)} → <strong>${money(p.proceeds)}</strong> ins Bargeld${p.fee ? ` · Gebühr rund ${money(p.usd * p.fee)}` : ''}`
+          : `${units(p.amount)} ${esc(sym)} werden entfernt${p.amount >= p.pos.amount ? ' – die Position verschwindet ganz' : ''}.`;
+    $('#e-msg').hidden = !(showError && p.error);
+    $('#e-msg').textContent = p.error ?? '';
+    return p;
+  }
+
   $('#p-rows').addEventListener('click', (e) => {
-    const key = e.target.closest('[data-remove]')?.dataset.remove;
+    const key = e.target.closest('[data-edit]')?.dataset.edit;
     if (key === undefined) return;
-    message = 'Position entfernt.';
-    store(copy().filter((p) => pf.keyOf(p) !== key));
+    const pos = depot.data.positions.find((p) => pf.keyOf(p) === key);
+    if (!pos) return;
+    // Ohne Kurs lässt sich nicht tauschen oder verkaufen – dann direkt „Entfernen“
+    edit = { key, action: find(pos) ? 'swap' : 'remove' };
+    $('#e-amount').value = String(pos.amount).replace('.', ',');
+    $('#e-target').value = '';
+    renderEdit();
+    $('#dlg-edit').showModal();
+  });
+  $('#e-actions').addEventListener('click', (e) => {
+    const action = e.target.closest('[data-action]')?.dataset.action;
+    if (action) { edit.action = action; renderEdit(); }
+  });
+  $('#e-all').addEventListener('click', () => {
+    const pos = depot.data.positions.find((p) => pf.keyOf(p) === edit.key);
+    if (pos) { $('#e-amount').value = String(pos.amount).replace('.', ','); renderEdit(); }
+  });
+  for (const id of ['#e-amount', '#e-target', '#e-fee']) $(id).addEventListener('input', () => renderEdit());
+
+  $('#p-edit').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const p = renderEdit(true);
+    if (p.error) return;
+    const sym = (p.c?.symbol ?? p.pos.symbol ?? '').toUpperCase();
+    const units = p.amount.toLocaleString('de-DE', { maximumSignificantDigits: 6 });
+    if (edit.action === 'remove') {
+      message = `${units} ${sym} entfernt.`;
+      $('#dlg-edit').close();
+      return store(copy().map((x) => (pf.keyOf(x) === edit.key ? { ...x, amount: x.amount - p.amount } : x)));
+    }
+    // Importierte Positionen kennen ihre Coin-ID noch nicht – hier wird sie ergänzt
+    const withIds = copy().map((x) => ({ ...x, id: x.id ?? find(x)?.id ?? null }));
+    const move = edit.action === 'sell'
+      ? { type: 'sell', id: p.c.id, usd: p.usd, price: p.c.current_price }
+      : { type: 'swap', id: p.c.id, usd: p.usd, price: p.c.current_price,
+        toCoin: { id: p.to.id, symbol: p.to.symbol, name: p.to.name, price: p.to.current_price } };
+    const result = applyMove(withIds, depot.data.cash, move, { fee: p.fee });
+    if (!result) { $('#e-msg').hidden = false; $('#e-msg').textContent = 'Das hat nicht geklappt – bitte Menge prüfen.'; return; }
+    message = edit.action === 'sell' ? `${units} ${sym} verkauft, ${money(p.proceeds)} ins Bargeld gebucht.`
+      : `${units} ${sym} in ${p.to.name} getauscht.`;
+    $('#dlg-edit').close();
+    saveDepot({ ...depot.data, positions: result.positions, cash: result.cash });
   });
 
   $('#p-clear').addEventListener('click', () => { message = 'Portfolio geleert.'; saveDepot(pf.empty()); });
@@ -1222,7 +1337,7 @@ function portfolioView() {
         <td class="num">${g === null ? '–' : `<span class="${tone(g)}">${money(g)}</span><br><small>${pct(g / p * 100)}</small>`}</td>
         <td class="col-score">${a ? scoreCell(a.score) : '–'}</td>
         <td>${a ? badge(a) : '–'}</td>
-        <td><button class="icon" data-remove="${esc(pf.keyOf(pos))}" title="Position entfernen" aria-label="Position entfernen">✕</button></td>
+        <td><button class="btn ghost small" data-edit="${esc(pf.keyOf(pos))}">Ändern</button></td>
       </tr>`;
     }).join('') : '<tr><td colspan="10" class="empty">Noch keine Coins – nur Bargeld. Mit „+ Position“ fügst du Coins hinzu.</td></tr>';
 

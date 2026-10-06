@@ -266,6 +266,12 @@ textarea { background: var(--panel); color: var(--text); border: 1px solid var(-
 .import-list .tag { flex: 0 0 76px; }
 .dialog .check { margin: 14px 0; display: flex; gap: 8px; align-items: center; font-size: 14px; }
 
+.input-row { display: flex; gap: 8px; }
+.input-row input { flex: 1; }
+.preview { min-height: 1.5em; margin: 0; font-size: 14px; }
+#e-actions { justify-self: start; }
+.form label[hidden] { display: none; }
+
 /* Konto */
 .gate { display: grid; grid-template-columns: 1fr minmax(0, 440px); gap: 28px; align-items: start; margin-top: 28px; }
 .gate h1 { font-size: 30px; margin: 0 0 10px; }
