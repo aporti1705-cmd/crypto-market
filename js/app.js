@@ -22,6 +22,9 @@ const DERIVATIVE = /wrapped|staked|staking|bridged|restaked|\busd|usd\b/i;
 const state = {
   raw: new Map(), coins: [], byId: new Map(), bySymbol: new Map(), byName: new Map(),
   market: null, fng: null, btcData: null, btcInd: null, marketNews: null,
+  daily: new Map(),     // Tageskurse je Coin-ID, sobald geladen
+  news: new Map(),      // ausgewertete Nachrichten je Coin-ID
+  refining: false,
   sort: { key: 'rank', dir: 1 }, page: 1, query: '', filter: 'all',
   gen: 0, nextPage: 1, pagesLoaded: 0, updated: null,
 };
@@ -45,6 +48,13 @@ function rebuild() {
   state.bySymbol.clear(); state.byName.clear();
   for (const c of coins) {
     c.analysis = quickAnalyse(c, regime);
+    // Sind Tageskurse geladen, gilt überall die verfeinerte Bewertung – in der Liste wie in der Detailansicht
+    const daily = state.daily.get(c.id);
+    c.ind = null;
+    if (daily && isNum(c.current_price)) {
+      c.ind = prepare(daily.t, [...daily.p.slice(0, -1), c.current_price], daily.v);
+      c.analysis = detailAnalyse(c, c.ind, regime, state.news.get(c.id));
+    }
     // Bei doppelten Kürzeln gewinnt der Coin mit der größeren Marktkapitalisierung
     if (!state.bySymbol.has(c.symbol.toLowerCase())) state.bySymbol.set(c.symbol.toLowerCase(), c);
     if (!state.byName.has(c.name.toLowerCase())) state.byName.set(c.name.toLowerCase(), c);
@@ -100,6 +110,7 @@ async function loadPage(gen) {
     setStatus(null);
     current?.update();
     if (state.nextPage === 1) saveCache();
+    if (state.pagesLoaded >= api.PAGES) refineAll();
     return true;
   } catch (err) {
     if (gen === state.gen) setStatus(err.message);
@@ -121,6 +132,40 @@ async function marketLoop() {
     else if (state.pagesLoaded >= api.PAGES) await sleep(PAGE_INTERVAL_MS);
     while (document.hidden) await sleep(3000);
   }
+}
+
+// Lädt im Hintergrund die Tageskurse aller Coins, die Binance führt, damit die Liste dieselbe
+// verfeinerte Bewertung zeigt wie die Detailansicht. Reihenfolge: nach Marktkapitalisierung.
+const refineChecked = new Set();
+
+async function refineAll() {
+  if (state.refining) return;
+  // Jeden Coin nur einmal prüfen, sonst würde die Paarliste alle 30 Sekunden neu geladen
+  const fresh = state.coins.filter((c) => !refineChecked.has(c.id) && !state.daily.has(c.id) && !c.analysis.stable);
+  if (!fresh.length) return;
+  state.refining = true;
+  try {
+    const prices = await api.binancePrices();
+    for (const c of fresh) refineChecked.add(c.id);
+    const todo = fresh.filter((c) => {
+      const p = prices.get(c.symbol.toUpperCase() + 'USDT');
+      // Gleiches Kürzel, aber ein anderer Coin? Dann weicht der Kurs deutlich ab
+      return p && Math.abs(p / c.current_price - 1) < 0.1;
+    });
+    let done = 0;
+    const worker = async () => {
+      for (let c = todo.shift(); c; c = todo.shift()) {
+        try {
+          const data = await api.history(c.symbol);
+          if (data && !state.daily.has(c.id)) state.daily.set(c.id, { ...data, source: 'Binance' });
+        } catch { /* einzelner Coin nicht ladbar – es bleibt bei der Schnellbewertung */ }
+        if (++done % 20 === 0) { rebuild(); current?.update(); }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    rebuild(); current?.update();
+  } catch { /* Binance nicht erreichbar */ }
+  state.refining = false;
 }
 
 async function fngLoop() {
@@ -453,27 +498,32 @@ function detailView(id) {
 
   const self = { update };
 
+  // Tageskurse landen in state.daily, Nachrichten in state.news. rebuild() rechnet daraus die eine
+  // Bewertung des Coins, die auch die Liste zeigt.
   async function loadData(c) {
     try {
-      let data = null;
-      try { data = await api.history(c.symbol); } catch { /* Binance nicht erreichbar */ }
-      // Gleiches Kürzel, aber ein anderer Coin? Dann weicht der Kurs deutlich ab
-      if (data && Math.abs(data.p[data.p.length - 1] / c.current_price - 1) > 0.1) data = null;
-      d.source = data ? 'Binance' : 'CoinGecko';
-      if (!data) data = await api.chart(id, settings.currency);
-      if (current !== self) return;
-      d.data = data;
-      d.ind = prepare(data.t, data.p, data.v);
+      if (!state.daily.has(id)) {
+        let data = null;
+        try { data = await api.history(c.symbol); } catch { /* Binance nicht erreichbar */ }
+        // Gleiches Kürzel, aber ein anderer Coin? Dann weicht der Kurs deutlich ab
+        if (data && Math.abs(data.p[data.p.length - 1] / c.current_price - 1) > 0.1) data = null;
+        const source = data ? 'Binance' : 'CoinGecko';
+        if (!data) data = await api.chart(id, settings.currency);
+        state.daily.set(id, { ...data, source });
+        rebuild();
+      }
     } catch (err) {
-      if (current !== self) return;
       d.error = err.message;
     }
+    if (current !== self) return;
     chart(); update();
   }
 
   async function loadNews(c) {
-    try { d.news = analyseNews(await api.coinNews(c.name, c.symbol)); }
-    catch (err) { d.newsError = err.message; }
+    try {
+      state.news.set(id, analyseNews(await api.coinNews(c.name, c.symbol)));
+      rebuild();
+    } catch (err) { d.newsError = err.message; }
     if (current === self) update();
   }
 
@@ -598,13 +648,17 @@ function detailView(id) {
         ? 'Dieser Coin gehört aktuell nicht zu den Top 1000.' : 'Lade Kurse …'}</p></section>`;
       return;
     }
+    d.data = state.daily.get(id) ?? null;
+    d.ind = d.data ? c.ind : null;
+    d.source = d.data?.source ?? null;
+    d.news = state.news.get(id) ?? null;
     if (!d.started) {
       d.started = true;
       loadData(c);
-      if (!c.analysis.stable) loadNews(c);
+      if (!c.analysis.stable && !d.news) loadNews(c);
       chart();
     } else if (d.range === '7T') chart();
-    const a = d.ind ? detailAnalyse(c, d.ind, state.market?.regime ?? NO_REGIME, d.news) : c.analysis;
+    const a = c.analysis;
     head(c, a); forecast(c, a); news(a); stats(c);
   }
 

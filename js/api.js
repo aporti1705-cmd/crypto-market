@@ -81,6 +81,13 @@ export async function history(symbol) {
   return data;
 }
 
+// Aktuelle Kurse aller Binance-Handelspaare – zeigt, welche Coins dort eine Kursgeschichte haben
+export async function binancePrices() {
+  const res = await fetch('https://data-api.binance.vision/api/v3/ticker/price');
+  if (!res.ok) throw new Error('Binance nicht erreichbar.');
+  return new Map((await res.json()).map((x) => [x.symbol, Number(x.price)]));
+}
+
 // Aktueller Fear & Greed Index samt Verlauf (für den Rückblick-Test)
 export async function fearGreed() {
   const res = await fetch('https://api.alternative.me/fng/?limit=1500');
