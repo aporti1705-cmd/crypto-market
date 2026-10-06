@@ -12,6 +12,13 @@ const FNG_REFRESH_MS = 30 * 60_000;
 const BTC_REFRESH_MS = 10 * 60_000;
 const NO_REGIME = { score: null, factors: [] };
 const PAGE_SIZE = 100;
+// Zentral berechnete Daten (scripts/snapshot.mjs, alle 20 Minuten über GitHub Actions)
+// Beim lokalen Entwickeln wird die Datei gelesen, die `node scripts/snapshot.mjs` nach out/ schreibt
+const SNAPSHOT_URL = ['localhost', '127.0.0.1'].includes(location.hostname) ? 'out/snapshot.json'
+  : 'https://raw.githubusercontent.com/aporti1705-cmd/crypto-market/data/snapshot.json';
+const SNAPSHOT_MAX_AGE_MS = 2 * 3_600_000;    // ältere Daten gelten als ausgefallen – dann rechnet der Browser selbst
+const SNAPSHOT_REFRESH_MS = 5 * 60_000;
+const LIVE_PRICE_MS = 60_000;
 const STALE_MS = 15 * 60_000;
 const CACHE_KEY = 'krypto-markt-kurse-usd';
 const CACHE_FIELDS = ['id', 'symbol', 'name', 'image', 'current_price', 'market_cap', 'market_cap_rank', 'total_volume',
@@ -26,6 +33,7 @@ const state = {
   market: null, fng: null, btcData: null, btcInd: null, marketNews: null,
   daily: new Map(),     // Tageskurse je Coin-ID, sobald geladen
   news: new Map(),      // ausgewertete Nachrichten je Coin-ID
+  server: false,        // true: Bewertungen kommen fertig vom Server und werden hier nicht neu gerechnet
   refining: false,
   refineDone: false,    // Hintergrund-Bewertung mindestens einmal abgeschlossen
   sort: { key: 'rank', dir: 1 }, page: 1, query: '', filter: 'all',
@@ -37,7 +45,28 @@ let current = null;
 
 // ---------- Daten ----------
 
+// Sortierte Liste und Suchtabellen neu aufbauen
+function reindex(coins) {
+  state.bySymbol.clear(); state.byName.clear();
+  for (const c of coins) {
+    // Bei doppelten Kürzeln gewinnt der Coin mit der größeren Marktkapitalisierung
+    if (!state.bySymbol.has(c.symbol.toLowerCase())) state.bySymbol.set(c.symbol.toLowerCase(), c);
+    if (!state.byName.has(c.name.toLowerCase())) state.byName.set(c.name.toLowerCase(), c);
+  }
+  state.coins = coins;
+  state.byId = state.raw;
+}
+
 function rebuild() {
+  if (state.server) {
+    // Bewertungen stehen fest; nur die Tagesindikatoren für Diagramm und Rückblick-Test werden ergänzt
+    const coins = [...state.raw.values()].sort((a, b) => (a.market_cap_rank ?? 1e9) - (b.market_cap_rank ?? 1e9));
+    for (const c of coins) {
+      const daily = state.daily.get(c.id);
+      c.ind = daily && isNum(c.current_price) ? prepare(daily.t, [...daily.p.slice(0, -1), c.current_price], daily.v) : null;
+    }
+    return reindex(coins);
+  }
   // Coins, die seit mehreren Durchläufen nicht mehr geliefert wurden, sind aus den Top 1000 gefallen
   if (state.pagesLoaded >= api.PAGES) {
     for (const [id, c] of state.raw) if (c.fetched && Date.now() - c.fetched > STALE_MS) state.raw.delete(id);
@@ -52,7 +81,6 @@ function rebuild() {
   state.market = marketIndex(coins, state.btcInd, state.fng, state.marketNews);
   if (state.market) state.market.time = new Date();
   const regime = state.market?.regime ?? NO_REGIME;
-  state.bySymbol.clear(); state.byName.clear();
   for (const c of coins) {
     c.analysis = quickAnalyse(c, regime);
     // Sind Tageskurse geladen, gilt überall die verfeinerte Bewertung – in der Liste wie in der Detailansicht
@@ -62,18 +90,14 @@ function rebuild() {
       c.ind = prepare(daily.t, [...daily.p.slice(0, -1), c.current_price], daily.v);
       c.analysis = detailAnalyse(c, c.ind, regime, state.news.get(c.id));
     }
-    // Bei doppelten Kürzeln gewinnt der Coin mit der größeren Marktkapitalisierung
-    if (!state.bySymbol.has(c.symbol.toLowerCase())) state.bySymbol.set(c.symbol.toLowerCase(), c);
-    if (!state.byName.has(c.name.toLowerCase())) state.byName.set(c.name.toLowerCase(), c);
   }
-  state.coins = coins;
-  state.byId = state.raw;
+  reindex(coins);
 }
 
 function setStatus(error) {
   $('#dot').className = 'dot ' + (error ? 'fail' : state.updated ? 'live' : '');
   const total = api.PAGES * 250;
-  const loaded = state.coins.length < total && state.pagesLoaded < api.PAGES ? ` · ${state.coins.length} von ${total} Coins geladen` : ` · ${state.coins.length} Coins`;
+  const loaded = state.server ? ' · zentral berechnet' : state.coins.length < total && state.pagesLoaded < api.PAGES ? ` · ${state.coins.length} von ${total} Coins geladen` : ` · ${state.coins.length} Coins`;
   $('#updated').textContent = state.updated ? `Stand: ${state.updated.toLocaleTimeString('de-DE')}${loaded}` : 'Lade Kurse …';
   $('#error').hidden = !error;
   if (error) $('#error').textContent = error + (state.coins.length ? ' Es werden die zuletzt geladenen Kurse angezeigt.' : '');
@@ -180,6 +204,79 @@ async function refineAll() {
   state.refining = false;
   state.refineDone = true;
   current?.update();
+}
+
+// ---------- Zentral berechnete Daten ----------
+
+// Lädt das Ergebnis der zentralen Berechnung. Gibt false zurück, wenn es fehlt oder zu alt ist.
+async function loadSnapshot() {
+  try {
+    // Die Zeitangabe in der Adresse umgeht zu lange Zwischenspeicherung
+    const res = await fetch(`${SNAPSHOT_URL}?t=${Math.floor(Date.now() / SNAPSHOT_REFRESH_MS)}`);
+    if (!res.ok) return false;
+    const snap = await res.json();
+    if (!Array.isArray(snap.coins) || snap.coins.length < 100 || Date.now() - snap.time > SNAPSHOT_MAX_AGE_MS) return false;
+    if (state.server && state.updated && snap.time <= state.updated.getTime()) return true;   // nichts Neues
+
+    const live = new Map([...state.raw.values()].map((c) => [c.id, c.current_price]));
+    state.server = true;
+    state.gen++;                        // beendet eine laufende Berechnung im Browser
+    state.raw = new Map();
+    for (const c of snap.coins) {
+      c.analysis.regime = snap.market.regime;
+      c.snapshotPrice = c.current_price;
+      if (state.liveSince && isNum(live.get(c.id))) c.current_price = live.get(c.id);   // Live-Kurs behalten
+      state.raw.set(c.id, c);
+    }
+    state.market = { ...snap.market, time: new Date(snap.time) };
+    if (snap.fng && !state.fng) {
+      // Bis der vollständige Verlauf geladen ist, reichen heute, vor 7 und vor 30 Tagen
+      const history = [];
+      history[0] = { value: snap.fng.value }; history[7] = { value: snap.fng.week }; history[29] = { value: snap.fng.month };
+      state.fng = { value: snap.fng.value, history, byDay: new Map() };
+    }
+    state.pagesLoaded = api.PAGES;
+    state.refineDone = true;
+    state.updated = new Date(snap.time);
+    rebuild();
+    setStatus(null);
+    current?.update();
+    return true;
+  } catch { return false; }
+}
+
+// Zwischen zwei Berechnungen die Kurse aktuell halten: ein Abruf bei Binance liefert alle Paare.
+// Die Bewertungen bleiben dabei unverändert.
+async function livePriceLoop() {
+  while (state.server) {
+    try {
+      const prices = await api.binancePrices();
+      for (const c of state.raw.values()) {
+        const p = prices.get(c.symbol.toUpperCase() + 'USDT');
+        // Gleiches Kürzel, aber ein anderer Coin? Dann weicht der Kurs deutlich ab
+        if (p && Math.abs(p / c.snapshotPrice - 1) < 0.2) c.current_price = p;
+      }
+      state.liveSince = Date.now();
+      rebuild();
+      current?.update();
+    } catch { /* Binance nicht erreichbar – es bleiben die Kurse der letzten Berechnung */ }
+    await sleep(LIVE_PRICE_MS);
+    while (document.hidden) await sleep(3000);
+  }
+}
+
+async function start() {
+  if (await loadSnapshot()) {
+    livePriceLoop();
+    for (;;) {
+      await sleep(SNAPSHOT_REFRESH_MS);
+      while (document.hidden) await sleep(3000);
+      await loadSnapshot();
+    }
+  }
+  // Keine zentralen Daten verfügbar: Der Browser lädt und rechnet selbst
+  marketLoop();
+  newsLoop();
 }
 
 async function fngLoop() {
@@ -529,7 +626,7 @@ function detailView(id) {
       d.error = err.message;
     }
     if (current !== self) return;
-    chart(); update();
+    update(); chart();   // update() übernimmt die geladenen Tageskurse, erst dann kann das Diagramm zeichnen
   }
 
   async function loadNews(c) {
@@ -632,12 +729,12 @@ function detailView(id) {
     const n = d.news;
     const tag = (t) => (t > 0 ? '<span class="tag up">positiv</span>' : t < 0 ? '<span class="tag down">negativ</span>' : '<span class="tag">neutral</span>');
     const body = !n ? `<p class="muted">${esc(d.newsError ?? 'Lade Nachrichten …')}</p>` : `
-      <p>${esc(n.text)}${n.score !== null ? ` → Einfluss auf den Score: <strong class="${tone(Math.round(n.score * 10))}">${signed(n.score * 10, 0)} Punkte</strong>` : ''}</p>
+      <p>${esc(n.text)}${n.score !== null && !state.server ? ` → Einfluss auf den Score: <strong class="${tone(Math.round(n.score * 10))}">${signed(n.score * 10, 0)} Punkte</strong>` : ''}</p>
       <ul class="news">${n.items.slice(0, 8).map((it) => `<li>${tag(it.tone)}
         <span>${/^https?:\/\//.test(it.link) ? `<a href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title)}
         <br><span class="muted">${esc(it.source ?? '')} · ${new Date(it.time).toLocaleDateString('de-DE')}</span></span></li>`).join('')}</ul>`;
     el.innerHTML = `<section class="panel"><h2>Nachrichten</h2>
-      <p class="hint">Englischsprachige Meldungen der letzten 7 Tage, automatisch nach Stichwörtern als positiv oder negativ eingestuft. Die Einstufung ist grob und kann danebenliegen – deshalb verschieben Nachrichten den Score um höchstens 10 Punkte.</p>
+      <p class="hint">Englischsprachige Meldungen der letzten 7 Tage, automatisch nach Stichwörtern als positiv oder negativ eingestuft. Die Einstufung ist grob und kann danebenliegen. ${state.server ? 'In den Score dieses Coins fließen sie nicht ein; die allgemeine Nachrichtenlage steckt im Markt-Index.' : 'Deshalb verschieben Nachrichten den Score um höchstens 10 Punkte.'}</p>
       ${body}</section>`;
   }
 
@@ -1267,7 +1364,6 @@ function route() {
 
 window.addEventListener('hashchange', route);
 route();
-marketLoop();
+start();
 fngLoop();
 bitcoinLoop();
-newsLoop();
