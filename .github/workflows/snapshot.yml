@@ -1,0 +1,36 @@
+# Berechnet alle 20 Minuten Kurse, Bewertungen und Markt-Index und legt das Ergebnis
+# als snapshot.json im Zweig "data" ab. Die Website lädt nur noch diese Datei.
+name: Daten berechnen
+
+on:
+  schedule:
+    - cron: '7,27,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Berechnen
+        run: node scripts/snapshot.mjs out/snapshot.json
+      - name: Im Zweig "data" ablegen
+        run: |
+          cd out
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snapshot.json
+          git commit -q -m "Daten vom $(date -u +'%Y-%m-%d %H:%M') UTC"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
