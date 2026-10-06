@@ -855,7 +855,7 @@ function portfolioView() {
       <div class="actions">
         <button class="btn" id="p-open-add">+ Position</button>
         <button class="btn ghost" id="p-open-import">Importieren</button>
-        <button class="btn ghost" id="p-open-reserve">Reserve <b id="r-chip"></b></button>
+        <button class="btn ghost" id="p-open-reserve">Reserve-Ziel <b id="r-chip"></b></button>
       </div>
     </div>
     <p id="p-msg" class="notice" hidden></p>
@@ -863,7 +863,6 @@ function portfolioView() {
     <div id="p-body">
       <section id="p-summary" class="summary"></section>
       <div id="p-alloc"></div>
-      <div id="p-manager"></div>
       <h2>Bestand</h2>
       <div class="table-wrap"><table>
         <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
@@ -871,6 +870,7 @@ function portfolioView() {
         <tbody id="p-rows"></tbody>
       </table></div>
       <p class="foot-actions"><button class="link" id="p-clear" type="button">Portfolio leeren</button></p>
+      <div id="p-manager"></div>
     </div>
 
     <dialog id="dlg-add" class="dialog">
@@ -887,8 +887,9 @@ function portfolioView() {
 
     <dialog id="dlg-reserve" class="dialog">
       <div>
-        <div class="dialog-top"><h2>Reserve</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
-        <p class="hint">Anteil des Portfolios, der nicht in Coins investiert sein soll. Die Vorschläge richten sich nach diesem Wert.</p>
+        <div class="dialog-top"><h2>Reserve-Ziel</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
+        <p class="hint">So viel deines Portfolios <em>soll</em> als Reserve liegen (Bargeld und Stablecoins) statt in Coins. Das ist ein Ziel – die Vorschläge zeigen, wie du dorthin kommst.</p>
+        <p id="r-actual"></p>
         <strong class="reserve-value" id="r-value"></strong>
         <input type="range" id="r-slider" min="0" max="100" step="5" aria-label="Gewünschte Reserve in Prozent">
         <div class="range-labels"><span>0 % · voll investiert</span><span>100 % · alles in Reserve</span></div>
@@ -1107,7 +1108,7 @@ function portfolioView() {
     const card = (label, value, sub = '', cls = '') => `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}</div><div class="muted">${sub}</div></div>`;
     $('#p-summary').innerHTML = card('Gesamtwert', money(total), `heute ${pct(total - day > 0 ? day / (total - day) * 100 : 0)} (${money(day)})`, 'main') +
       card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) : 'Kaufpreise fehlen') +
-      card('Reserve', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios` : '');
+      card('Reserve aktuell', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios · Ziel ${depot.data.reservePct ?? suggestedReserve()} %` : '');
 
     $('#p-rows').innerHTML = rows.length ? rows.map(({ pos, c, value, unit, paid: p, gain: g }) => {
       const a = c?.analysis;
@@ -1129,17 +1130,23 @@ function portfolioView() {
     }).join('') : '<tr><td colspan="10" class="empty">Noch keine Coins – nur Bargeld. Mit „+ Position“ fügst du Coins hinzu.</td></tr>';
 
     allocation(rows, cash, total);
-    reserve();
+    reserve(cash + stableValue, total);
     manager(rows, total);
   }
 
-  function reserve() {
+  function reserve(actual, total) {
     const suggested = suggestedReserve();
     const chosen = depot.data.reservePct;
     const value = chosen ?? suggested;
     const slider = $('#r-slider');
     if (document.activeElement !== slider) { slider.value = value; $('#r-value').textContent = `${value} %`; }
     $('#r-chip').textContent = `${value} %`;
+    const share = total ? actual / total * 100 : 0;
+    const gap = total * value / 100 - actual;
+    $('#r-actual').innerHTML = `Aktuell liegen <strong>${money(actual)}</strong> in Reserve (${num(share, 0)} %). `
+      + (Math.abs(gap) < total * 0.02 ? 'Das entspricht dem Ziel.'
+        : gap > 0 ? `Für ${value} % fehlen rund <strong>${money(gap)}</strong> – dafür schlägt der Manager Verkäufe vor.`
+          : `Das sind rund <strong>${money(-gap)}</strong> mehr als das Ziel – dafür schlägt der Manager Käufe vor.`);
     $('#r-hint').innerHTML = state.market
       ? `Vorschlag für die aktuelle Marktphase: <strong>${suggested} %</strong>. ${esc(exposureFor(state.market.regime).text)}
          ${chosen === null ? 'Du folgst dem Vorschlag.' : `Du hast <strong>${chosen} %</strong> gewählt – die Vorschläge unten richten sich danach.`}`
