@@ -231,7 +231,9 @@ summary:hover { color: var(--text); }
 .empty-state .btn-row .btn { flex: 0 1 auto; }
 .foot-actions { text-align: right; margin-top: 10px; }
 
-#p-reserve { margin-top: 18px; }
+#r-chip { margin-left: 6px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.done-row { margin-top: 18px; }
+.dialog .reserve-value { display: block; }
 .reserve-value { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
 input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; margin: 4px 0 0; }
 .range-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
@@ -251,6 +253,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; marg
 .dialog > form, .dialog > div { padding: 0 22px 22px; }
 .dialog > .dialog-top, .dialog > form > .dialog-top { padding-top: 18px; }
 .dialog > form { padding-top: 0; }
+.dialog > div > .dialog-top { padding-top: 18px; }
 .dialog-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 4px; }
 .dialog-top h2 { margin: 0; font-size: 19px; }
 .dialog h3 { margin: 18px 0 8px; }

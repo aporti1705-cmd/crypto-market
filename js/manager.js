@@ -23,6 +23,7 @@ export const DEFAULTS = {
   profitGainHigh: 1.5,
   trailStop: 0.25,        // Verkauf, wenn der Kurs so weit unter sein Hoch seit dem Kauf fällt
   stopLoss: null,         // Verkauf, wenn der Kurs so weit unter den Kaufpreis fällt
+  pairSwaps: true,        // Verkäufe und Käufe als Tausch vorschlagen
   profitRepeat: 1.3,      // erneute Gewinnmitnahme erst, wenn der Kurs seit der letzten um 30 % gestiegen ist
 };
 
@@ -178,11 +179,10 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
         goal: 'Einen Teil des Gewinns sichern, den Rest weiterlaufen lassen.',
         reason: `Die Position liegt ${fmt(c.gain * 100)} % im Plus, und ${signal(c) !== 'buy' ? 'das Kaufsignal ist nicht mehr da' : 'der langfristige Trend ist überdehnt'}.${c.cutForExposure ? ' Zusätzlich verlangt die Marktphase eine höhere Reserve.' : ''}`,
         horizon: 'In den nächsten Tagen umsetzen.', review: review(14), reviewText: 'Restposition in 2 Wochen erneut prüfen.' });
-      else if (c.why === 'swap') moves.push({ ...base, type: 'swap', title: `${c.name} in ${c.swapTo.name} tauschen`, to: c.swapTo.id, toCoin: { id: c.swapTo.id, symbol: c.swapTo.symbol, name: c.swapTo.name, price: c.swapTo.price },
+      else if (c.why === 'swap') moves.push({ ...base, type: 'sell', title: `${c.name} verkaufen`,
         goal: 'Kapital aus einer schwachen in eine deutlich stärkere Position umschichten.',
-        reason: `${c.name} hat kein Kaufsignal mehr (Score ${fmt(score(c))}), ${c.swapTo.name} steht bei ${fmt(score(c.swapTo))}. Der Abstand ist groß genug, um die doppelte Gebühr zu rechtfertigen.`,
-        horizon: `Haltedauer für ${c.swapTo.name}: ${c.swapTo.analysis?.horizon ?? '2–4 Wochen'}.`,
-        review: review(REVIEW_DAYS[c.swapTo.analysis?.horizon] ?? 7), fee: usd * o.fee * 2 });
+        reason: `${c.name} hat kein Kaufsignal mehr (Score ${fmt(score(c))}), ${c.swapTo.name} steht bei ${fmt(score(c.swapTo))} – der Abstand ist groß genug, um die doppelte Gebühr zu rechtfertigen.`,
+        horizon: 'In den nächsten Tagen umsetzen.', review: review(7) });
       else if (c.why === 'cap') moves.push({ ...base, type: 'reduce', title: `${c.name} reduzieren`,
         goal: 'Klumpenrisiko senken: Keine einzelne Position soll das Portfolio dominieren.',
         reason: `${c.name} macht ${Math.round(c.value / total * 100)} % des Portfolios aus, die Obergrenze liegt bei ${Math.round(cap(c) / total * 100)} %.`,
@@ -191,14 +191,44 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
         goal: 'Investitionsquote an die Marktphase anpassen und Reserve aufbauen.',
         reason: `${exposure.text} Gekürzt wird zuerst, was den schwächsten Score hat (${fmt(score(c))}).`,
         horizon: 'In den nächsten Tagen umsetzen.', review: review(7), reviewText: 'In einer Woche prüfen, ob sich die Marktphase gebessert hat.' });
-    } else if (!c.swapFrom) {
+    } else {
       moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
         goal: c.held ? 'Eine starke Position ausbauen, solange das Kaufsignal steht.' : 'Freie Reserve in einen Coin mit starkem Signal investieren.',
         reason: `Kaufsignal (Score ${fmt(score(c))}, Risiko ${a.risk?.label ?? 'unbekannt'}). ${factorHint(a)}`,
         horizon: `Haltedauer: ${a.horizon ?? '2–4 Wochen'}.`, review: review(REVIEW_DAYS[a.horizon] ?? 7) });
     }
   }
-  // Tausch-Käufe hängen am Verkauf; nur der Mehrbetrag wäre ein eigener Kauf
+  // Verkäufe und Käufe zu Tauschvorschlägen paaren: Der Erlös eines Verkaufs fließt direkt in einen Kauf.
+  // Was übrig bleibt, geht in die Reserve (Verkauf) oder kommt aus der Reserve (Kauf).
+  if (o.pairSwaps) {
+    const sells = moves.filter((m) => m.usd > 0 && (m.type === 'sell' || m.type === 'reduce' || m.type === 'profit')).sort((x, y) => y.usd - x.usd);
+    const buys = moves.filter((m) => m.type === 'buy' || m.type === 'add').sort((x, y) => y.score - x.score);
+    for (const sell of sells) {
+      for (const buy of buys) {
+        if (sell.usd < minTrade / 2 || buy.usd < minTrade / 2) continue;
+        let usd = Math.min(sell.usd, buy.usd);
+        // Kleine Reste nicht als eigenen Schritt stehen lassen
+        if (sell.usd - usd < minTrade / 2) usd = sell.usd;
+        const part = usd / sell.usd;
+        moves.push({ id: sell.id, name: sell.name, symbol: sell.symbol, price: sell.price, score: sell.score,
+          usd, units: usd / sell.price, fee: usd * o.fee * 2, type: 'swap', from: sell.type, to: buy.id,
+          toCoin: { id: buy.id, symbol: buy.symbol, name: buy.name, price: buy.price },
+          toUnits: usd * (1 - o.fee) * (1 - o.fee) / buy.price,
+          title: `${sell.name} in ${buy.name} tauschen`,
+          goal: `${sell.goal} Der Erlös geht direkt in ${buy.name}.`,
+          reason: `${sell.name}: ${sell.reason} ${buy.name}: ${buy.reason}`,
+          horizon: buy.horizon, review: buy.review, reviewText: buy.reviewText });
+        sell.usd -= usd; sell.units -= sell.units * part; sell.fee = sell.usd * o.fee;
+        buy.usd = Math.max(0, buy.usd - usd); buy.units = buy.usd / buy.price; buy.fee = buy.usd * o.fee;
+      }
+    }
+    for (let k = moves.length - 1; k >= 0; k--) {
+      const m = moves[k];
+      const rest = m.type !== 'swap' && m.usd < minTrade / 2;
+      // Reste eines vollständigen Ausstiegs bleiben als Verkauf stehen, sonst bliebe ein Krümel im Bestand
+      if (rest && !(m.usd >= o.minTradeUsd && (m.type === 'sell'))) moves.splice(k, 1);
+    }
+  }
   moves.sort((x, y) => ORDER[x.type] - ORDER[y.type] || y.usd - x.usd);
 
   const fees = moves.reduce((s, m) => s + m.fee, 0);
@@ -263,6 +293,8 @@ export function applyMove(positions, cash, move, { fee = DEFAULTS.fee, stableIds
     const got = sell(move.id, move.usd, move.price);
     if (got < 1) return null;
     buy(move.toCoin, got, move.toCoin.price);
+    const source = find(move.id);
+    if (move.from === 'profit' && source) source.trimPrice = move.price;
   } else {
     const got = sell(move.id, move.usd, move.price);
     if (got <= 0) return null;

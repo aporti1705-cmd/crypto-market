@@ -855,6 +855,7 @@ function portfolioView() {
       <div class="actions">
         <button class="btn" id="p-open-add">+ Position</button>
         <button class="btn ghost" id="p-open-import">Importieren</button>
+        <button class="btn ghost" id="p-open-reserve">Reserve <b id="r-chip"></b></button>
       </div>
     </div>
     <p id="p-msg" class="notice" hidden></p>
@@ -862,20 +863,6 @@ function portfolioView() {
     <div id="p-body">
       <section id="p-summary" class="summary"></section>
       <div id="p-alloc"></div>
-      <section class="panel" id="p-reserve">
-        <div class="panel-top"><div><h2>Reserve</h2><div class="muted">Anteil, der nicht in Coins investiert sein soll</div></div><strong class="reserve-value" id="r-value"></strong></div>
-        <input type="range" id="r-slider" min="0" max="100" step="5" aria-label="Gewünschte Reserve in Prozent">
-        <div class="range-labels"><span>0 % · voll investiert</span><span>100 % · alles in Reserve</span></div>
-        <p class="hint" id="r-hint"></p>
-        <div class="reserve-row">
-          <button class="btn ghost small" id="r-auto" type="button">Vorschlag übernehmen</button>
-          <form id="p-cash" class="inline-form">
-            <label for="p-cash-value">Bargeld außerhalb der Coins (USD)</label>
-            <input id="p-cash-value" inputmode="decimal" placeholder="0">
-            <button class="btn ghost small" type="submit">Speichern</button>
-          </form>
-        </div>
-      </section>
       <div id="p-manager"></div>
       <h2>Bestand</h2>
       <div class="table-wrap"><table>
@@ -898,6 +885,26 @@ function portfolioView() {
       </form>
     </dialog>
 
+    <dialog id="dlg-reserve" class="dialog">
+      <div>
+        <div class="dialog-top"><h2>Reserve</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
+        <p class="hint">Anteil des Portfolios, der nicht in Coins investiert sein soll. Die Vorschläge richten sich nach diesem Wert.</p>
+        <strong class="reserve-value" id="r-value"></strong>
+        <input type="range" id="r-slider" min="0" max="100" step="5" aria-label="Gewünschte Reserve in Prozent">
+        <div class="range-labels"><span>0 % · voll investiert</span><span>100 % · alles in Reserve</span></div>
+        <p class="hint" id="r-hint"></p>
+        <div class="reserve-row">
+          <button class="btn ghost small" id="r-auto" type="button">Vorschlag übernehmen</button>
+          <form id="p-cash" class="inline-form">
+            <label for="p-cash-value">Bargeld außerhalb der Coins (USD)</label>
+            <input id="p-cash-value" inputmode="decimal" placeholder="0">
+            <button class="btn ghost small" type="submit">Speichern</button>
+          </form>
+        </div>
+        <div class="btn-row done-row"><button class="btn" type="button" data-close>Fertig</button></div>
+      </div>
+    </dialog>
+
     <dialog id="dlg-import" class="dialog wide">
       <div class="dialog-top"><h2>Portfolio importieren</h2><button class="icon" type="button" data-close aria-label="Schließen">✕</button></div>
       <div id="imp-body"></div>
@@ -916,6 +923,7 @@ function portfolioView() {
     d.addEventListener('click', (e) => { if (e.target === d || e.target.closest('[data-close]')) d.close(); });
   }
   $('#p-open-add').addEventListener('click', () => { $('#p-add-msg').hidden = true; $('#dlg-add').showModal(); });
+  $('#p-open-reserve').addEventListener('click', () => $('#dlg-reserve').showModal());
   $('#p-open-import').addEventListener('click', () => { imp = null; renderImport(); $('#dlg-import').showModal(); });
   view.addEventListener('click', (e) => {
     if (e.target.closest('[data-open-add]')) $('#p-open-add').click();
@@ -1131,6 +1139,7 @@ function portfolioView() {
     const value = chosen ?? suggested;
     const slider = $('#r-slider');
     if (document.activeElement !== slider) { slider.value = value; $('#r-value').textContent = `${value} %`; }
+    $('#r-chip').textContent = `${value} %`;
     $('#r-hint').innerHTML = state.market
       ? `Vorschlag für die aktuelle Marktphase: <strong>${suggested} %</strong>. ${esc(exposureFor(state.market.regime).text)}
          ${chosen === null ? 'Du folgst dem Vorschlag.' : `Du hast <strong>${chosen} %</strong> gewählt – die Vorschläge unten richten sich danach.`}`
@@ -1194,7 +1203,9 @@ function portfolioView() {
     const amount = (m) => `${m.units.toLocaleString('de-DE', { maximumSignificantDigits: 4 })} ${esc(m.symbol.toUpperCase())}`;
     const cards = p.moves.map((m, i) => `<article class="move ${m.type}">
         <div class="move-top"><span class="move-type">${MOVE_LABEL[m.type]}</span><h3>${esc(m.title)}</h3><strong>${money(m.usd)}</strong></div>
-        <p class="muted">${m.type === 'buy' || m.type === 'add' ? 'Für' : 'Etwa'} ${amount(m)} zum Kurs von ${money(m.price)} · Gebühr rund ${money(m.fee)}${m.type === 'swap' ? ' (Verkauf und Kauf)' : ''}</p>
+        <p class="muted">${m.type === 'swap'
+          ? `${amount(m)} abgeben → rund ${m.toUnits.toLocaleString('de-DE', { maximumSignificantDigits: 4 })} ${esc(m.toCoin.symbol.toUpperCase())} erhalten · Gebühr rund ${money(m.fee)} (Verkauf und Kauf)`
+          : `${m.type === 'buy' || m.type === 'add' ? 'Für' : 'Etwa'} ${amount(m)} zum Kurs von ${money(m.price)} · Gebühr rund ${money(m.fee)}`}</p>
         <dl>
           <div><dt>Ziel</dt><dd>${esc(m.goal)}</dd></div>
           <div><dt>Warum</dt><dd>${esc(m.reason)}</dd></div>
@@ -1215,6 +1226,7 @@ function portfolioView() {
       <details${open ? ' open' : ''}><summary>So arbeitet der Manager – und was er nicht kann</summary>
         <ul class="plain">
           <li><strong>Feste Vorschläge:</strong> Sie werden einmal berechnet und bleiben stehen, bis du etwas am Portfolio änderst oder „Neu berechnen“ wählst.</li>
+          <li><strong>Tauschen:</strong> Passen ein Verkauf und ein Kauf zusammen, schlägt der Manager einen direkten Tausch vor. Gerechnet wird mit zweimal 0,25 % Gebühr; tauscht deine Börse direkt in einem Schritt, ist es weniger.</li>
           <li><strong>Erst das Risiko:</strong> Die Reserve bestimmt, wie viel investiert sein soll. Der Vorschlag dafür kommt aus der Marktphase; du kannst ihn überschreiben.</li>
           <li><strong>Verkaufen, wenn Kurse fallen:</strong> Verkaufssignale werden verkauft. Fällt ein Coin 25 % unter sein Hoch seit dem Kauf, greift die Schutzregel – unabhängig vom Score.</li>
           <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
