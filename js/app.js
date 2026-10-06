@@ -604,6 +604,7 @@ function detailView(id) {
     d.range = btn.dataset.range;
     for (const b of $('#ranges').children) b.classList.toggle('active', b === btn);
     chart();
+    update();   // Kopfzeile zeigt die Veränderung über den gewählten Zeitraum
   });
 
   const self = { update };
@@ -653,13 +654,30 @@ function detailView(id) {
     } else el.innerHTML = `<p class="muted">${esc(d.error ?? 'Lade Kursverlauf …')}</p>`;
   }
 
+  // Kursveränderung über den im Diagramm gewählten Zeitraum, gemessen bis zum aktuellen Kurs
+  function rangeChange(c) {
+    if (d.range === '7T') {
+      const v = c.price_change_percentage_7d_in_currency;
+      return isNum(v) ? `<div>${pct(v)} <span class="muted">in 7 Tagen</span></div>` : '';
+    }
+    if (!d.data) return '';
+    const n = Math.min(RANGES[d.range], d.data.p.length);
+    const first = d.data.p[d.data.p.length - n];
+    if (!(first > 0) || !isNum(c.current_price)) return '';
+    const days = Math.round((Date.now() - d.data.t[d.data.t.length - n]) / 86_400_000);
+    // Reicht die Kursgeschichte nicht so weit zurück, steht die tatsächliche Spanne da
+    const label = n < RANGES[d.range] ? `${days} Tagen (gesamte Kursgeschichte)` : { '30T': '30 Tagen', '90T': '90 Tagen', '1J': '1 Jahr', '4J': '4 Jahren' }[d.range];
+    return `<div>${pct((c.current_price / first - 1) * 100)} <span class="muted">in ${label}</span></div>`;
+  }
+
   function head(c, a) {
     $('#d-head').innerHTML = `<section class="panel d-head">
       <div class="d-coin"><img src="${esc(c.image)}" alt="">
         <div><h1 class="d-name">${esc(c.name)} <span class="coin-sym">${esc(c.symbol)}</span></h1>
           <div class="muted">Rang #${c.market_cap_rank ?? '–'}</div></div></div>
       <div><div class="d-price">${money(c.current_price)}</div>
-        <div>${pct(c.price_change_percentage_24h_in_currency)} <span class="muted">in 24 Stunden</span></div></div>
+        <div>${pct(c.price_change_percentage_24h_in_currency)} <span class="muted">in 24 Stunden</span></div>
+        ${rangeChange(c)}</div>
       <div class="d-signal">${badge(a, 'big')}
         <dl><div><dt>Prognose-Score</dt><dd class="${tone(a.score)}">${a.score === null ? '–' : signed(a.score, 0) + ' / 100'}</dd></div>
           <div><dt>Haltedauer</dt><dd>${a.horizon}</dd></div>
@@ -962,7 +980,7 @@ function portfolioView() {
       <div id="p-alloc"></div>
       <h2>Bestand</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
+        <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">24 h</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
           <th class="num col-30d">Ø Kaufpreis</th><th class="num">Gewinn / Verlust</th><th class="col-score">Prognose</th><th>Signal</th><th></th></tr></thead>
         <tbody id="p-rows"></tbody>
       </table></div>
@@ -976,7 +994,7 @@ function portfolioView() {
         <label>Coin <input id="p-coin" list="coinlist" placeholder="z. B. Bitcoin oder BTC" required autocomplete="off"></label>
         <datalist id="coinlist"></datalist>
         <label>Menge <input id="p-amount" inputmode="decimal" placeholder="0,5" required></label>
-        <label>Kaufpreis je Coin in USD (optional) <input id="p-cost" inputmode="decimal" placeholder="für Gewinn und Verlust"></label>
+        <label>Kaufpreis je Coin in USD (optional) <input id="p-cost" inputmode="decimal" placeholder="leer = aktueller Kurs"></label>
         <p id="p-add-msg" class="notice" hidden></p>
         <div class="btn-row"><button class="btn" type="submit">Hinzufügen</button><button class="btn ghost" type="button" data-close>Abbrechen</button></div>
       </form>
@@ -1061,7 +1079,7 @@ function portfolioView() {
     message = `${c.name} hinzugefügt.`;
     e.target.reset();
     $('#dlg-add').close();
-    store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd', since: Date.now(), peak: c.current_price }));
+    store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : c.current_price, costCur: 'usd', since: Date.now(), peak: c.current_price }));
   });
 
   // ----- Import in zwei Schritten: Datei wählen, dann Zuordnung prüfen -----
@@ -1116,7 +1134,8 @@ function portfolioView() {
     }
     $('#imp-back').addEventListener('click', () => { imp = null; renderImport(); });
     $('#imp-do').addEventListener('click', () => {
-      const fresh = result.positions.map((p) => ({ ...p, id: find(p)?.id ?? null, since: Date.now() }));
+      // Fehlt in der Datei ein Kaufpreis, gilt der aktuelle Kurs
+      const fresh = result.positions.map((p) => { const c = find(p); return { ...p, id: c?.id ?? null, cost: p.cost ?? c?.current_price ?? null, since: Date.now() }; });
       message = `${fresh.length} Positionen importiert.`;
       const replace = $('#imp-replace').checked;
       $('#dlg-import').close();
@@ -1331,6 +1350,7 @@ function portfolioView() {
         <td class="col-coin">${name}</td>
         <td class="num">${pos.amount.toLocaleString('de-DE', { maximumFractionDigits: 8 })}</td>
         <td class="num col-7d">${c ? money(c.current_price) : '–'}</td>
+        <td class="num">${pct(c?.price_change_percentage_24h_in_currency)}</td>
         <td class="num">${money(value)}</td>
         <td class="num col-cap">${value !== null && total ? num(value / total * 100) + ' %' : '–'}</td>
         <td class="num col-30d">${unit === null ? '–' : money(unit)}</td>
@@ -1339,7 +1359,7 @@ function portfolioView() {
         <td>${a ? badge(a) : '–'}</td>
         <td><button class="btn ghost small" data-edit="${esc(pf.keyOf(pos))}">Ändern</button></td>
       </tr>`;
-    }).join('') : '<tr><td colspan="10" class="empty">Noch keine Coins – nur Bargeld. Mit „+ Position“ fügst du Coins hinzu.</td></tr>';
+    }).join('') : '<tr><td colspan="11" class="empty">Noch keine Coins – nur Bargeld. Mit „+ Position“ fügst du Coins hinzu.</td></tr>';
 
     allocation(rows, cash, total);
     reserve(cash + stableValue, total);
