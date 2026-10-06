@@ -1,6 +1,8 @@
 import { $, esc, settings, sleep, isNum, money, compact, num, signed, tone, pct } from './util.js';
 import * as api from './api.js';
 import * as pf from './portfolio.js';
+import * as auth from './auth.js';
+import { plan, applyMove, adjusted } from './manager.js';
 import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
@@ -10,7 +12,7 @@ const FNG_REFRESH_MS = 30 * 60_000;
 const BTC_REFRESH_MS = 10 * 60_000;
 const NO_REGIME = { score: null, factors: [] };
 const PAGE_SIZE = 100;
-const RISK_WEIGHT = [1, 0.9, 0.75, 0.55];   // Abwertung im Ranking je Risikostufe
+const STALE_MS = 15 * 60_000;
 const CACHE_KEY = 'krypto-markt-kurse-usd';
 const CACHE_FIELDS = ['id', 'symbol', 'name', 'image', 'current_price', 'market_cap', 'market_cap_rank', 'total_volume',
   'high_24h', 'low_24h', 'ath', 'ath_change_percentage', 'circulating_supply', 'max_supply',
@@ -35,6 +37,10 @@ let current = null;
 // ---------- Daten ----------
 
 function rebuild() {
+  // Coins, die seit mehreren Durchläufen nicht mehr geliefert wurden, sind aus den Top 1000 gefallen
+  if (state.pagesLoaded >= api.PAGES) {
+    for (const [id, c] of state.raw) if (c.fetched && Date.now() - c.fetched > STALE_MS) state.raw.delete(id);
+  }
   const coins = [...state.raw.values()].sort((a, b) => (a.market_cap_rank ?? 1e9) - (b.market_cap_rank ?? 1e9));
   // Marktphase immer mit dem aktuellen Bitcoin-Kurs rechnen, nicht mit dem Stand beim Laden der Tageskurse
   const btc = state.raw.get('bitcoin');
@@ -88,7 +94,7 @@ function restoreCache() {
   try {
     const cache = JSON.parse(localStorage.getItem(CACHE_KEY));
     if (!Array.isArray(cache?.coins)) return Infinity;
-    for (const c of cache.coins) state.raw.set(c.id, c);
+    for (const c of cache.coins) { c.fetched = Date.now(); state.raw.set(c.id, c); }
     state.pagesLoaded = Math.min(api.PAGES, Math.ceil(cache.coins.length / 250));
     state.updated = new Date(cache.time);
     rebuild();
@@ -102,7 +108,8 @@ async function loadPage(gen) {
   try {
     const list = await api.markets(settings.currency, page);
     if (gen !== state.gen) return false;
-    for (const c of list) state.raw.set(c.id, c);
+    const now = Date.now();
+    for (const c of list) { c.fetched = now; state.raw.set(c.id, c); }
     state.nextPage = page % api.PAGES + 1;
     state.pagesLoaded = Math.max(state.pagesLoaded, page);
     state.updated = new Date();
@@ -345,10 +352,9 @@ function marketView() {
 
   function picks() {
     // Riskantere Coins brauchen einen höheren Score, um vorne zu landen
-    const adjusted = (c) => c.analysis.score * RISK_WEIGHT[c.analysis.risk.level];
     const list = state.coins.filter((c) => c.analysis.signal === 'buy' && (c.market_cap_rank ?? 9999) <= 500 &&
       c.total_volume >= 1e6 && !DERIVATIVE.test(c.name))
-      .sort((a, b) => adjusted(b) - adjusted(a)).slice(0, 8);
+      .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 8);
     $('#picks').innerHTML = list.length ? list.map((c) => `<a class="pick panel" href="#/coin/${encodeURIComponent(c.id)}">
         <div class="coin-cell"><img src="${esc(c.image)}" alt="" loading="lazy">
           <div><div class="coin-name">${esc(c.name)}</div><div class="coin-sym">${esc(c.symbol)} · #${c.market_cap_rank}</div></div></div>
@@ -390,7 +396,7 @@ function marketView() {
         <td class="num col-7d">${pct(d7)}</td>
         <td class="num col-30d">${pct(c.price_change_percentage_30d_in_currency)}</td>
         <td class="num col-cap">${compact(c.market_cap)}</td>
-        <td class="col-chart">${sparkline(c.sparkline_in_7d?.price, d7 >= 0)}</td>
+        <td class="col-chart">${sparkline(c.sparkline_in_7d?.price, !isNum(d7) || d7 >= 0)}</td>
         <td class="col-score">${scoreCell(a.score)}</td>
         <td class="col-hold">${a.horizon}</td>
         <td class="col-risk">${riskTag(a.risk)}</td>
@@ -665,35 +671,165 @@ function detailView(id) {
   return self;
 }
 
+// ---------- Portfolio: Speicherung und Konto ----------
+
+// Das Portfolio liegt immer im Browser und, wenn angemeldet, zusätzlich im Konto
+const depot = { data: pf.load(), user: null, sync: 'local', error: null, stop: null };
+
+function saveDepot(data) {
+  depot.data = pf.normalise(data);
+  pf.save(depot.data);
+  if (depot.user) {
+    depot.sync = 'saving';
+    auth.savePortfolio(depot.user.uid, depot.data).then(
+      () => { depot.sync = 'synced'; depot.error = null; },
+      (err) => { depot.sync = 'error'; depot.error = err.message; },
+    ).finally(() => current?.update());
+  }
+  current?.update();
+}
+
+function renderAccountLink() {
+  const link = $('#nav-account');
+  link.textContent = depot.user ? (depot.user.name || depot.user.email || 'Konto') : 'Anmelden';
+}
+
+auth.onUser(async (user) => {
+  depot.stop?.();
+  depot.stop = null;
+  const before = depot.user;
+  depot.user = user;
+  if (user) {
+    depot.sync = 'saving';
+    let first = true;
+    try {
+      depot.stop = await auth.watchPortfolio(user.uid, (cloud, pending) => {
+        if (cloud) {
+          // Eigene, noch nicht bestätigte Änderungen sind lokal schon da
+          if (!pending) { depot.data = pf.normalise(cloud); pf.save(depot.data); }
+          depot.sync = 'synced';
+        } else if (first) saveDepot(depot.data);   // erstes Anmelden: Portfolio aus dem Browser ins Konto übernehmen
+        first = false;
+        current?.update();
+      }, (err) => { depot.sync = 'error'; depot.error = err.message; current?.update(); });
+    } catch (err) { depot.sync = 'error'; depot.error = err.message; }
+  } else {
+    // Nach dem Abmelden bleibt nichts auf dem Gerät zurück; die Daten liegen im Konto
+    if (before) { depot.data = pf.empty(); pf.save(depot.data); }
+    depot.sync = 'local';
+  }
+  renderAccountLink();
+  current?.update();
+});
+
+const SYNC_TEXT = {
+  local: 'Dein Portfolio ist nur in diesem Browser gespeichert. Mit einem Konto kannst du es von überall abrufen.',
+  saving: 'Wird mit deinem Konto abgeglichen …',
+  synced: 'In deinem Konto gespeichert – auf jedem Gerät abrufbar, auf dem du dich anmeldest.',
+};
+
+function accountView() {
+  let shown = null, message = '', busy = false;
+
+  function render() {
+    shown = depot.user?.uid ?? (auth.available ? 'out' : 'off');
+    if (!auth.available) {
+      view.innerHTML = `<h2>Konto</h2><section class="panel">
+        <p>Konten sind auf dieser Seite noch nicht eingerichtet. Dein Portfolio wird solange nur in diesem Browser gespeichert.</p>
+        <p class="hint">Für Betreiber: Firebase-Projekt anlegen und die Zugangsdaten in <code>js/firebase-config.js</code> eintragen – die Schritte stehen in der README.</p>
+      </section>`;
+      return;
+    }
+    if (depot.user) {
+      view.innerHTML = `<h2>Konto</h2><section class="panel">
+        <p>Angemeldet als <strong>${esc(depot.user.email ?? depot.user.name ?? '')}</strong></p>
+        <p class="hint" id="a-sync"></p>
+        <p><a class="btn" href="#/portfolio">Zum Portfolio</a> <button class="btn ghost" id="a-logout">Abmelden</button></p>
+        <p id="a-msg" class="notice" hidden></p>
+      </section>`;
+      $('#a-logout').addEventListener('click', () => act(() => auth.logout()));
+      return;
+    }
+    view.innerHTML = `<h2>Anmelden oder Konto erstellen</h2>
+      <p class="hint">Mit einem Konto wird dein Portfolio gespeichert und ist auf jedem Gerät abrufbar. Ein Portfolio, das du schon in diesem Browser angelegt hast, wird beim ersten Anmelden übernommen.</p>
+      <section class="panel account">
+        <button class="btn google" id="a-google" type="button">Mit Google anmelden</button>
+        <div class="or"><span>oder mit E-Mail-Adresse</span></div>
+        <form id="a-form" class="form">
+          <label>E-Mail-Adresse <input id="a-email" type="email" autocomplete="email" required></label>
+          <label>Passwort (mindestens 6 Zeichen) <input id="a-password" type="password" autocomplete="current-password" required minlength="6"></label>
+          <div class="btn-row">
+            <button class="btn" type="submit" data-action="login">Anmelden</button>
+            <button class="btn ghost" type="submit" data-action="register">Konto erstellen</button>
+          </div>
+          <button class="link" type="button" id="a-reset">Passwort vergessen?</button>
+        </form>
+        <p id="a-msg" class="notice" hidden></p>
+      </section>`;
+    $('#a-google').addEventListener('click', () => act(() => auth.loginGoogle(), true));
+    $('#a-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const email = $('#a-email').value.trim(), password = $('#a-password').value;
+      const register = e.submitter?.dataset.action === 'register';
+      act(() => (register ? auth.register(email, password) : auth.login(email, password)), true);
+    });
+    $('#a-reset').addEventListener('click', () => {
+      const email = $('#a-email').value.trim();
+      if (!email) { message = 'Bitte gib oben deine E-Mail-Adresse ein und klick dann erneut auf „Passwort vergessen?“.'; return update(); }
+      act(async () => { await auth.resetPassword(email); message = `Falls es ein Konto für ${email} gibt, ist eine E-Mail zum Zurücksetzen unterwegs.`; });
+    });
+  }
+
+  // Führt eine Konto-Aktion aus und zeigt Fehler an; nach erfolgreicher Anmeldung geht es zum Portfolio
+  async function act(fn, toPortfolio = false) {
+    if (busy) return;
+    busy = true; message = '';
+    update();
+    try {
+      await fn();
+      if (toPortfolio) location.hash = '#/portfolio';
+    } catch (err) { message = err.message; }
+    busy = false;
+    if (current === self) update();
+  }
+
+  function update() {
+    const now = depot.user?.uid ?? (auth.available ? 'out' : 'off');
+    if (now !== shown) render();
+    const msg = $('#a-msg');
+    if (msg) { msg.hidden = !message; msg.textContent = message; }
+    const sync = $('#a-sync');
+    if (sync) sync.textContent = depot.sync === 'error' ? `Speichern fehlgeschlagen: ${depot.error}` : SYNC_TEXT[depot.sync];
+    for (const b of view.querySelectorAll('button')) b.disabled = busy;
+  }
+
+  const self = { update };
+  return self;
+}
+
 // ---------- Portfolio ----------
 
+const MOVE_LABEL = { sell: 'Verkaufen', profit: 'Gewinn mitnehmen', reduce: 'Reduzieren', swap: 'Tauschen', buy: 'Kaufen', add: 'Nachkaufen' };
+const dateText = (d) => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
 function portfolioView() {
-  let list = pf.load();
   let message = '';
+  let lastPlan = null;
   view.innerHTML = `
     <h2>Mein Portfolio</h2>
-    <p class="hint">Dein Portfolio wird nur in diesem Browser gespeichert und nirgendwohin übertragen.</p>
+    <p class="hint" id="p-where"></p>
     <section id="p-summary" class="summary"></section>
+    <div id="p-manager"></div>
+    <h2>Bestand</h2>
     <div class="table-wrap"><table>
       <thead><tr><th class="col-coin">Coin</th><th class="num">Menge</th><th class="num col-7d">Kurs</th><th class="num">Wert</th><th class="num col-cap">Anteil</th>
-        <th class="num col-30d">Ø Kaufpreis</th><th class="num">Gewinn / Verlust</th><th class="col-hold">Haltedauer</th><th>Signal</th><th></th></tr></thead>
+        <th class="num col-30d">Ø Kaufpreis</th><th class="num">Gewinn / Verlust</th><th class="col-score">Prognose</th><th>Signal</th><th></th></tr></thead>
       <tbody id="p-rows"></tbody>
     </table></div>
-    <section class="panel" id="p-check"></section>
+    <p id="p-msg" class="notice" hidden></p>
     <div class="two-col">
       <section class="panel">
-        <h2>Aus CoinMarketCap importieren</h2>
-        <p class="hint">CoinMarketCap bietet keine Schnittstelle, über die eine andere Website dein Portfolio direkt abrufen darf.
-          Der Weg führt deshalb über eine Datei: Portfolio bei CoinMarketCap als CSV exportieren und hier auswählen. Erkannt werden
-          Bestände und Transaktionslisten mit Spalten für Coin (Name oder Kürzel), Menge und optional Kaufpreis in USD und Typ (Kauf/Verkauf).</p>
-        <form id="p-import" class="form">
-          <label>CSV-Datei <input type="file" id="p-file" accept=".csv,.txt,text/csv" required></label>
-          <label class="check"><input type="checkbox" id="p-replace" checked> Bestehende Positionen ersetzen</label>
-          <button class="btn" type="submit">Importieren</button>
-        </form>
-      </section>
-      <section class="panel">
-        <h2>Position von Hand hinzufügen</h2>
+        <h2>Position hinzufügen</h2>
         <form id="p-add" class="form">
           <label>Coin <input id="p-coin" list="coinlist" placeholder="z. B. Bitcoin oder BTC" required autocomplete="off"></label>
           <datalist id="coinlist"></datalist>
@@ -702,11 +838,31 @@ function portfolioView() {
           <button class="btn" type="submit">Hinzufügen</button>
         </form>
       </section>
+      <section class="panel">
+        <h2>Reserve</h2>
+        <p class="hint">Geld, das du zusätzlich investieren könntest (z. B. Guthaben auf der Börse). Stablecoins in deinem Bestand zählen automatisch zur Reserve.</p>
+        <form id="p-cash" class="form">
+          <label>Reserve in USD <input id="p-cash-value" inputmode="decimal" placeholder="0"></label>
+          <button class="btn" type="submit">Speichern</button>
+        </form>
+      </section>
     </div>
-    <p id="p-msg" class="notice" hidden></p>
+    <section class="panel">
+      <h2>Aus CoinMarketCap importieren</h2>
+      <p class="hint">CoinMarketCap bietet keine Schnittstelle, über die eine andere Website dein Portfolio direkt abrufen darf.
+        Der Weg führt deshalb über eine Datei: Portfolio bei CoinMarketCap als CSV exportieren und hier auswählen. Erkannt werden
+        Bestände und Transaktionslisten mit Spalten für Coin (Name oder Kürzel), Menge und optional Kaufpreis in USD und Typ (Kauf/Verkauf).</p>
+      <form id="p-import" class="form">
+        <label>CSV-Datei <input type="file" id="p-file" accept=".csv,.txt,text/csv" required></label>
+        <label class="check"><input type="checkbox" id="p-replace" checked> Bestehende Positionen ersetzen</label>
+        <button class="btn" type="submit">Importieren</button>
+      </form>
+    </section>
     <p><button class="btn ghost" id="p-clear">Portfolio leeren</button></p>`;
 
   const say = (text) => { message = text; update(); };
+  const copy = () => depot.data.positions.map((p) => ({ ...p }));
+  const store = (positions, cash = depot.data.cash) => saveDepot({ positions, cash });
   const find = (pos) => (pos.id && state.byId.get(pos.id))
     || state.bySymbol.get((pos.symbol || pos.name || '').toLowerCase())
     || state.byName.get((pos.name || pos.symbol || '').toLowerCase());
@@ -718,10 +874,9 @@ function portfolioView() {
     try {
       const res = pf.parseImport(await file.text(), 'usd');
       if (!res.positions.length) throw new Error('In der Datei wurden keine Bestände gefunden.');
-      list = $('#p-replace').checked ? res.positions : res.positions.reduce(pf.add, list);
-      pf.save(list);
+      message = `${res.positions.length} Positionen aus ${res.rows} Zeilen importiert${res.skipped ? `, ${res.skipped} Zeilen übersprungen` : ''}.`;
       e.target.reset();
-      say(`${res.positions.length} Positionen aus ${res.rows} Zeilen importiert${res.skipped ? `, ${res.skipped} Zeilen übersprungen` : ''}.`);
+      store($('#p-replace').checked ? res.positions : res.positions.reduce(pf.add, copy()));
     } catch (err) { say('Import fehlgeschlagen: ' + err.message); }
   });
 
@@ -735,28 +890,57 @@ function portfolioView() {
     const cost = pf.parseNumber($('#p-cost').value);
     if (!c) return say(`„${text}“ wurde unter den geladenen Coins nicht gefunden.`);
     if (!(amount > 0)) return say('Bitte eine Menge größer als 0 eingeben.');
-    list = pf.add(list, { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd' });
-    pf.save(list);
+    message = `${c.name} hinzugefügt.`;
     e.target.reset();
-    say(`${c.name} hinzugefügt.`);
+    store(pf.add(copy(), { id: c.id, symbol: c.symbol, name: c.name, amount, cost: cost > 0 ? cost : null, costCur: 'usd' }));
+  });
+
+  $('#p-cash').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const raw = $('#p-cash-value').value.trim();
+    const cash = raw ? pf.parseNumber(raw) : 0;
+    if (!(cash >= 0)) return say('Bitte einen Betrag von 0 oder mehr eingeben.');
+    message = 'Reserve gespeichert.';
+    store(copy(), cash);
   });
 
   $('#p-rows').addEventListener('click', (e) => {
     const key = e.target.closest('[data-remove]')?.dataset.remove;
     if (key === undefined) return;
-    list = list.filter((p) => pf.keyOf(p) !== key);
-    pf.save(list);
-    say('Position entfernt.');
+    message = 'Position entfernt.';
+    store(copy().filter((p) => pf.keyOf(p) !== key));
   });
 
-  $('#p-clear').addEventListener('click', () => { list = []; pf.save(list); say('Portfolio geleert.'); });
+  $('#p-clear').addEventListener('click', () => {
+    message = 'Portfolio geleert.';
+    store([], 0);
+  });
+
+  // Einen empfohlenen Schritt als ausgeführt eintragen: Mengen, Reserve und Kaufpreise werden angepasst
+  $('#p-manager').addEventListener('click', (e) => {
+    const index = e.target.closest('[data-move]')?.dataset.move;
+    const move = lastPlan?.moves[index];
+    if (!move) return;
+    // Importierte Positionen kennen ihre Coin-ID noch nicht – hier wird sie ergänzt
+    const withIds = copy().map((p) => ({ ...p, id: p.id ?? find(p)?.id ?? null }));
+    const stableIds = withIds.filter((p) => state.byId.get(p.id)?.analysis.stable).map((p) => p.id);
+    const result = applyMove(withIds, depot.data.cash, move, { stableIds });
+    if (!result) return say('Für diesen Kauf fehlt die Reserve. Trag zuerst die Verkäufe als umgesetzt ein oder erhöhe die Reserve.');
+    message = `Eingetragen: ${move.title}.`;
+    store(result.positions, result.cash);
+  });
 
   const self = { update };
   let optionCount = -1;
 
   function update() {
+    const list = depot.data.positions;
+    $('#p-where').textContent = depot.sync === 'error' ? `Speichern im Konto fehlgeschlagen: ${depot.error}` : SYNC_TEXT[depot.sync];
     $('#p-msg').hidden = !message; $('#p-msg').textContent = message;
-    $('#p-clear').hidden = !list.length;
+    // Reserve-Feld mit dem gespeicherten Wert füllen, solange niemand gerade darin tippt
+    const cashInput = $('#p-cash-value');
+    if (document.activeElement !== cashInput) cashInput.value = depot.data.cash ? String(Math.round(depot.data.cash * 100) / 100).replace('.', ',') : '';
+    $('#p-clear').hidden = !list.length && !depot.data.cash;
     if (optionCount !== state.coins.length) {
       optionCount = state.coins.length;
       $('#coinlist').innerHTML = state.coins.map((c) => `<option value="${esc(c.name)} (${esc(c.symbol.toUpperCase())})">`).join('');
@@ -770,7 +954,10 @@ function portfolioView() {
       return { pos, c, value, unit, paid, gain: value !== null && paid !== null ? value - paid : null };
     }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
 
-    const total = rows.reduce((s, r) => s + (r.value ?? 0), 0);
+    const cash = depot.data.cash;
+    const coinsValue = rows.reduce((s, r) => s + (r.value ?? 0), 0);
+    const total = coinsValue + cash;
+    const stableValue = rows.filter((r) => r.c?.analysis.stable).reduce((s, r) => s + r.value, 0);
     const priced = rows.filter((r) => r.gain !== null);
     const paid = priced.reduce((s, r) => s + r.paid, 0);
     const gain = priced.reduce((s, r) => s + r.gain, 0);
@@ -778,12 +965,16 @@ function portfolioView() {
       const ch = r.c?.price_change_percentage_24h_in_currency;
       return s + (r.value !== null && isNum(ch) ? r.value - r.value / (1 + ch / 100) : 0);
     }, 0);
+    const scored = rows.filter((r) => r.c && isNum(r.c.analysis.score));
+    const weight = scored.reduce((s, r) => s + r.value, 0);
+    const score = weight ? scored.reduce((s, r) => s + r.c.analysis.score * r.value, 0) / weight : null;
 
     const card = (label, value, sub = '') => `<div class="card"><div class="label">${label}</div><div class="value">${value}</div><div class="muted">${sub}</div></div>`;
-    $('#p-summary').innerHTML = list.length ? card('Gesamtwert', money(total)) +
-      card('Veränderung 24 h', `<span class="${tone(day)}">${money(day)}</span>`, total ? pct(day / (total - day) * 100) : '') +
-      card('Einsatz', priced.length ? money(paid) : '–', priced.length < rows.length ? 'nur Positionen mit Kaufpreis' : '') +
-      card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) : '') : '';
+    $('#p-summary').innerHTML = total > 0 ? card('Gesamtwert', money(total), 'inklusive Reserve') +
+      card('Reserve', money(cash + stableValue), total ? `${num((cash + stableValue) / total * 100, 0)} % des Portfolios` : '') +
+      card('Veränderung 24 h', `<span class="${tone(day)}">${money(day)}</span>`, total - day > 0 ? pct(day / (total - day) * 100) : '') +
+      card('Gewinn / Verlust', priced.length ? `<span class="${tone(gain)}">${money(gain)}</span>` : '–', paid ? pct(gain / paid * 100) + (priced.length < rows.length ? ' · nur Positionen mit Kaufpreis' : '') : '') +
+      card('Portfolio-Score', score === null ? '–' : `<span class="${tone(score)}">${signed(score, 0)}</span>`, 'nach Wert gewichtet') : '';
 
     $('#p-rows').innerHTML = rows.length ? rows.map(({ pos, c, value, unit, paid: p, gain: g }) => {
       const a = c?.analysis;
@@ -798,46 +989,67 @@ function portfolioView() {
         <td class="num col-cap">${value !== null && total ? num(value / total * 100) + ' %' : '–'}</td>
         <td class="num col-30d">${unit === null ? '–' : money(unit)}</td>
         <td class="num">${g === null ? '–' : `<span class="${tone(g)}">${money(g)}</span><br><small>${pct(g / p * 100)}</small>`}</td>
-        <td class="col-hold">${a ? a.horizon : '–'}</td>
+        <td class="col-score">${a ? scoreCell(a.score) : '–'}</td>
         <td>${a ? badge(a) : '–'}</td>
         <td><button class="icon" data-remove="${esc(pf.keyOf(pos))}" title="Position entfernen" aria-label="Position entfernen">✕</button></td>
       </tr>`;
-    }).join('') : '<tr><td colspan="10" class="empty">Noch keine Positionen. Importiere dein Portfolio oder füge unten eine Position hinzu.</td></tr>';
+    }).join('') : '<tr><td colspan="10" class="empty">Noch keine Positionen. Füge unten eine Position hinzu, trag eine Reserve ein oder importiere dein Portfolio.</td></tr>';
 
-    check(rows, total);
+    manager(rows, total);
   }
 
-  function check(rows, total) {
-    const el = $('#p-check');
-    const known = rows.filter((r) => r.c && r.value !== null);
-    el.hidden = !known.length || !total;
-    if (el.hidden) return;
-    const share = (signal) => known.filter((r) => r.c.analysis.signal === signal).reduce((s, r) => s + r.value, 0) / total * 100;
-    const scored = known.filter((r) => r.c.analysis.score !== null);
-    const weight = scored.reduce((s, r) => s + r.value, 0);
-    const score = weight ? scored.reduce((s, r) => s + r.c.analysis.score * r.value, 0) / weight : null;
+  function manager(rows, total) {
+    const el = $('#p-manager');
+    if (!(total > 0)) { lastPlan = null; el.innerHTML = ''; return; }
+    const known = rows.filter((r) => r.c && isNum(r.c.current_price));
+    const held = new Set(known.map((r) => r.c.id));
+    const candidates = state.coins.filter((c) => c.analysis.signal === 'buy' && !held.has(c.id) &&
+      (c.market_cap_rank ?? 9999) <= 300 && c.total_volume >= 5e6 && !DERIVATIVE.test(c.name))
+      .sort((a, b) => adjusted(b.analysis) - adjusted(a.analysis)).slice(0, 12)
+      .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis }));
+    const p = plan({
+      holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
+      cash: depot.data.cash, candidates, regime: state.market?.regime,
+    });
+    lastPlan = p;
+    if (!p) { el.innerHTML = ''; return; }
+    const open = !!$('details', el)?.open;   // aufgeklappte Erklärung beim Neuzeichnen offen lassen
 
-    const notes = [];
-    const names = (rs) => rs.map((r) => esc(r.c.name)).join(', ');
-    const sells = known.filter((r) => r.c.analysis.signal === 'sell');
-    if (sells.length) notes.push(`<span class="down">Verkaufssignal</span> bei ${names(sells)} – ${num(share('sell'), 0)} % deines Portfolios.`);
-    const buys = known.filter((r) => r.c.analysis.signal === 'buy');
-    if (buys.length) notes.push(`<span class="up">Kaufsignal</span> bei ${names(buys)}.`);
-    const big = known.find((r) => r.value / total > 0.5);
-    if (big && known.length > 1) notes.push(`Klumpenrisiko: ${esc(big.c.name)} macht ${num(big.value / total * 100, 0)} % deines Portfolios aus.`);
-    const risky = known.filter((r) => r.c.analysis.risk.level >= 3);
-    if (risky.length) notes.push(`Sehr hohes Risiko bei ${names(risky)}.`);
+    const loading = state.pagesLoaded < api.PAGES || state.refining;
     const missing = rows.length - known.length;
-    if (missing && state.pagesLoaded >= api.PAGES) notes.push(`${missing} Position(en) konnten keinem Coin der Top 1000 zugeordnet werden und zählen nicht zum Gesamtwert.`);
+    const amount = (m) => `${m.units.toLocaleString('de-DE', { maximumSignificantDigits: 4 })} ${esc(m.symbol.toUpperCase())}`;
+    const cards = p.moves.map((m, i) => `<article class="move ${m.type}">
+        <div class="move-top"><span class="move-type">${MOVE_LABEL[m.type]}</span><h3>${esc(m.title)}</h3><strong>${money(m.usd)}</strong></div>
+        <p class="muted">${m.type === 'buy' || m.type === 'add' ? 'Für' : 'Etwa'} ${amount(m)} zum Kurs von ${money(m.price)} · Gebühr rund ${money(m.fee)}${m.type === 'swap' ? ' (Verkauf und Kauf)' : ''}</p>
+        <dl>
+          <div><dt>Ziel</dt><dd>${esc(m.goal)}</dd></div>
+          <div><dt>Warum</dt><dd>${esc(m.reason)}</dd></div>
+          <div><dt>Zeitrahmen</dt><dd>${esc(m.horizon)} ${esc(m.reviewText ?? `Erneut prüfen am ${dateText(m.review)}.`)}</dd></div>
+        </dl>
+        <button class="btn small" data-move="${i}">Als umgesetzt eintragen</button>
+      </article>`).join('');
+    const holds = p.holds.length ? `<p><strong>Halten:</strong> ${p.holds.map((h) => `${esc(h.name)} (${signed(h.score, 0)})`).join(', ')} – hier lohnt im Moment kein Handel.</p>` : '';
 
-    el.innerHTML = `<h2>Portfolio-Check</h2>
-      <div class="stat-grid">
-        <div><div class="label">Portfolio-Score (nach Wert gewichtet)</div><div class="value ${tone(score)}">${score === null ? '–' : signed(score, 0) + ' / 100'}</div></div>
-        <div><div class="label">Anteil mit Kaufsignal</div><div class="value up">${num(share('buy'), 0)} %</div></div>
-        <div><div class="label">Anteil Halten</div><div class="value">${num(share('hold') + share('none'), 0)} %</div></div>
-        <div><div class="label">Anteil mit Verkaufssignal</div><div class="value down">${num(share('sell'), 0)} %</div></div>
-      </div>
-      ${notes.length ? `<ul class="plain">${notes.map((n) => `<li>${n}</li>`).join('')}</ul>` : ''}`;
+    el.innerHTML = `<section class="panel manager">
+      <div class="panel-top"><h2>Empfohlene Schritte</h2><span class="muted">Berechnet um ${new Date().toLocaleTimeString('de-DE')}</span></div>
+      <p>${esc(p.exposure.text)} Investiert sind ${num(p.investedShare * 100, 0)} %, das Ziel liegt bei ${num(p.targetShare * 100, 0)} %.
+        ${p.moves.length ? `Gebühren für alle Schritte zusammen: rund ${money(p.fees)}.` : ''}</p>
+      ${loading ? '<p class="notice">Die Bewertungen werden noch geladen – die Schritte können sich gleich noch ändern.</p>' : ''}
+      ${missing ? `<p class="notice">${missing} Position(en) ohne Kurs sind nicht berücksichtigt.</p>` : ''}
+      ${cards || '<p><strong>Im Moment kein Handlungsbedarf.</strong> Dein Portfolio passt zur Marktlage; jeder Handel würde nur Gebühren kosten.</p>'}
+      ${holds}
+      <details${open ? ' open' : ''}><summary>So arbeitet der Manager – und was er nicht kann</summary>
+        <ul class="plain">
+          <li><strong>Erst das Risiko:</strong> Die Marktphase bestimmt, wie viel investiert sein soll. Im Bärenmarkt bleibt der Großteil in Reserve.</li>
+          <li><strong>Verlierer raus, Gewinner laufen lassen:</strong> Verkaufssignale werden verkauft; bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
+          <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %), höchstens 8 Positionen.</li>
+          <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren, wöchentlich geprüft:</strong> rund +59 % pro Jahr bei einem größten zwischenzeitlichen Rückgang von 49 %. Bitcoin halten brachte im selben Zeitraum rund +38 % pro Jahr bei 77 % Rückgang.</li>
+          <li><strong>Grenzen:</strong> Die Rückrechnung enthält nur Coins, die es heute noch gibt, und ein Teil des Zeitraums diente zur Abstimmung der Regeln – die echten Ergebnisse werden schlechter sein. Nur jeder dritte Monat endete im Plus, der mittlere Monat lag bei 0 % (oft in Reserve), der beste bei +98 %. Kein einziger von 97 Monaten erreichte +100 %: Einen Manager, der verlässlich +100 % im Monat macht, gibt es nicht.</li>
+          <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
+        </ul>
+      </details>
+    </section>`;
   }
 
   return self;
@@ -847,9 +1059,13 @@ function portfolioView() {
 
 function route() {
   const [name, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', a.dataset.nav === (name === 'portfolio' ? 'portfolio' : 'market'));
-  if (name === 'coin' && arg) current = detailView(decodeURIComponent(arg));
+  const section = name === 'portfolio' ? 'portfolio' : name === 'konto' ? 'account' : 'market';
+  for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', a.dataset.nav === section);
+  let id = arg;
+  try { id = decodeURIComponent(arg ?? ''); } catch { /* fehlerhafte Adresse – unverändert verwenden */ }
+  if (name === 'coin' && id) current = detailView(id);
   else if (name === 'portfolio') current = portfolioView();
+  else if (name === 'konto') current = accountView();
   else current = marketView();
   current.update();
   window.scrollTo(0, 0);

@@ -1,16 +1,32 @@
 // Portfolio: Speicherung im Browser und CSV-Import (z. B. Export aus CoinMarketCap)
 
-const KEY = 'krypto-markt-portfolio';
+const KEY = 'krypto-markt-depot';
+const LEGACY_KEY = 'krypto-markt-portfolio';   // frühere Version: nur die Liste der Positionen
+
+export const empty = () => ({ positions: [], cash: 0 });
+
+// Macht aus beliebigen gespeicherten Daten ein gültiges Portfolio
+export function normalise(data) {
+  const positions = (Array.isArray(data?.positions) ? data.positions : [])
+    .filter((p) => p && Number.isFinite(p.amount) && p.amount > 0 && (p.id || p.symbol || p.name))
+    .map((p) => ({ id: p.id ?? null, symbol: p.symbol ?? '', name: p.name ?? '', amount: p.amount,
+      cost: Number.isFinite(p.cost) ? p.cost : null, costCur: 'usd',
+      ...(Number.isFinite(p.trimPrice) ? { trimPrice: p.trimPrice } : {}) }));
+  return { positions, cash: Number.isFinite(data?.cash) && data.cash > 0 ? data.cash : 0 };
+}
 
 export function load() {
   try {
-    const list = JSON.parse(localStorage.getItem(KEY));
-    return Array.isArray(list) ? list : [];
-  } catch { return []; }
+    const data = JSON.parse(localStorage.getItem(KEY));
+    if (data) return normalise(data);
+    const old = JSON.parse(localStorage.getItem(LEGACY_KEY));
+    if (Array.isArray(old)) return normalise({ positions: old });
+  } catch {}
+  return empty();
 }
 
-export function save(list) {
-  try { localStorage.setItem(KEY, JSON.stringify(list)); } catch {}
+export function save(data) {
+  try { localStorage.setItem(KEY, JSON.stringify(data)); } catch {}
 }
 
 export const keyOf = (pos) => String(pos.id || pos.symbol || pos.name).toLowerCase();

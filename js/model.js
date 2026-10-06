@@ -13,7 +13,10 @@
 
 import { clamp, avg, isNum, num, signed } from './util.js';
 
-const W_SHORT = 0.2, W_MEDIUM = 0.25, W_LONG = 0.2, W_REGIME = 0.35;
+// Gewichte nach Gegenprüfung an 2018–2022 und an 48 weiteren Coins: Die Marktphase trägt auch außerhalb des
+// Anpassungszeitraums am besten, der langfristige Baustein am schlechtesten.
+const W_SHORT = 0.2, W_MEDIUM = 0.25, W_LONG = 0.1, W_REGIME = 0.45;
+const BEAR_CAP = 0.11;          // im Bärenmarkt gibt es kein Kaufsignal
 const W_NEWS = 0.1;             // Nachrichten verschieben den Score um höchstens ±10 Punkte
 const BUY = 12, STRONG = 28;    // Schwellen des Gesamt-Scores (-100 … +100)
 const HORIZON_MIN = 0.1;
@@ -190,7 +193,10 @@ export function regimeAt(btc, j, fng) {
   if (isNum(fng)) {
     add('Fear & Greed', fng, (s) => `${fng} – ${fng >= 78 ? 'extreme Gier, historisch ein Warnzeichen' : verdict(s, 'Zuversicht ohne Übertreibung', 'Gier')}`, C.fng, 0.1);
   }
-  return horizon(f);
+  // Bärenmarkt: Bitcoin unter dem 200-Tage-Schnitt und der 50-Tage-Schnitt darunter. In solchen Phasen
+  // (z. B. 2022) lagen Kaufsignale in der Gegenprüfung überwiegend falsch.
+  const bear = s200 !== null && s200 < 0 && btc.sma50[j] < btc.sma200[j];
+  return { ...horizon(f), bear };
 }
 
 // Ersatz, falls keine Bitcoin-Tageskurse geladen werden konnten
@@ -241,7 +247,8 @@ export function totalScore(short, medium, long, regime) {
     .filter(([h]) => h && h.score !== null);
   // Ohne eigene Kursdaten des Coins gibt es keine Prognose
   if (!parts.some(([h]) => h !== regime)) return null;
-  return parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+  const raw = parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+  return regime?.bear ? Math.min(raw, BEAR_CAP) : raw;
 }
 
 export const signalOf = (score) => (score >= STRONG ? ['buy', 'Kaufen'] : score >= BUY ? ['buy', 'Eher kaufen']
@@ -252,6 +259,10 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   if (raw === null) return none('Keine Daten', 'Zu wenig Kursdaten für eine Prognose.');
   const notes = [];
   if (news && news.score !== null) raw += W_NEWS * news.score;
+  if (regime.bear) {
+    raw = Math.min(raw, BEAR_CAP);
+    notes.push('Bärenmarkt-Filter aktiv: Bitcoin liegt unter seinem 200-Tage-Schnitt im Abwärtstrend. In solchen Phasen gibt das Modell keine Kaufsignale.');
+  }
   const score = Math.round(clamp(raw) * 100);
   let [signal, label] = signalOf(score);
 

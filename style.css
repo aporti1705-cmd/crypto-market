@@ -199,6 +199,39 @@ tbody tr.coin:hover { background: var(--panel-2); }
 .two-col .panel { margin: 0; }
 .panel .two-col { margin-top: 0; }
 
+/* Portfolio-Manager */
+.manager { margin-top: 16px; }
+.move { border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 10px; padding: 14px 16px; margin: 12px 0; background: var(--panel-2); }
+.move.sell, .move.reduce { border-left-color: var(--down); }
+.move.profit { border-left-color: var(--hold); }
+.move.swap { border-left-color: var(--violet); }
+.move.buy, .move.add { border-left-color: var(--up); }
+.move-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.move-top h3 { flex: 1 1 200px; font-size: 16px; }
+.move-top strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.move-type { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.move p { margin: 4px 0 10px; font-size: 13px; }
+.move dl { margin: 0 0 12px; display: grid; gap: 6px; }
+.move dl div { display: grid; grid-template-columns: 90px 1fr; gap: 10px; font-size: 14px; }
+.move dt { color: var(--muted); }
+.move dd { margin: 0; }
+details { margin-top: 12px; font-size: 14px; }
+summary { cursor: pointer; color: var(--muted); }
+summary:hover { color: var(--text); }
+
+/* Konto */
+.account { max-width: 440px; }
+.btn.google { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+.or { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; margin: 16px 0; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn.small { padding: 7px 14px; font-size: 14px; }
+.btn:disabled { opacity: .5; cursor: default; }
+a.btn { display: inline-block; }
+.link { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; justify-self: start; }
+code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+main > #view > section.panel { margin-top: 16px; }
+
 /* Formulare */
 .form { display: grid; gap: 12px; }
 .form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }

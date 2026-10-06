@@ -99,23 +99,46 @@ export async function fearGreed() {
 // ---------- Nachrichten (cryptocurrency.cv, kostenlos, begrenzt auf wenige Suchen pro Stunde) ----------
 
 const NEWS = 'https://cryptocurrency.cv/api';
-const NEWS_TTL_MS = 30 * 60_000;
-const NO_NEWS = /etherscan|tradingview|stacker|nostr|blockchain.com/i;   // Quellen ohne redaktionelle Meldungen
+const NEWS_TTL_MS = 60 * 60_000;
+const NEWS_PER_HOUR = 15;         // der Dienst erlaubt 20 Suchen pro Stunde; wer weiterfragt, wird gesperrt
+const NEWS_PAUSE_MS = 60 * 60_000;
+const NEWS_LOG = 'krypto-markt-news-abrufe';
+const NO_NEWS = /etherscan|tradingview|stacker|nostr|blockchain\.com/i;   // Quellen ohne redaktionelle Meldungen
+
+const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
+const write = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
 
 async function newsRequest(path) {
   const key = 'krypto-markt-news:' + path;
-  try {
-    const hit = JSON.parse(sessionStorage.getItem(key));
-    if (hit && Date.now() - hit.time < NEWS_TTL_MS) return hit.items;
-  } catch {}
+  const hit = read(key);
+  if (hit && Date.now() - hit.time < NEWS_TTL_MS) return hit.items;
+
+  // Eigene Buchführung über die Abrufe der letzten Stunde, damit das Limit gar nicht erst erreicht wird
+  const log = read(NEWS_LOG) ?? { calls: [], pausedUntil: 0 };
+  log.calls = log.calls.filter((t) => Date.now() - t < 3_600_000);
+  const limited = new Error('Nachrichten-Limit für diese Stunde erreicht – bitte später erneut versuchen.');
+  if (Date.now() < log.pausedUntil || log.calls.length >= NEWS_PER_HOUR) throw limited;
+  log.calls.push(Date.now());
+  write(NEWS_LOG, log);
+
   const res = await fetch(NEWS + path);
-  if (!res.ok) throw new Error(res.status === 429 ? 'Nachrichten-Limit erreicht, bitte später erneut versuchen.' : 'Nachrichten nicht erreichbar.');
+  if (res.status === 429 || res.status === 403) {
+    write(NEWS_LOG, { ...log, pausedUntil: Date.now() + NEWS_PAUSE_MS });
+    throw limited;
+  }
+  if (!res.ok) throw new Error('Nachrichten nicht erreichbar.');
   const json = await res.json();
   const items = (json.articles || [])
     .filter((a) => a.title && a.link && !NO_NEWS.test(`${a.source} ${a.link}`))
     .map((a) => ({ title: a.title, description: (a.description || '').slice(0, 300), link: a.link, source: a.source, time: Date.parse(a.pubDate) }))
     .filter((a) => Number.isFinite(a.time));
-  try { sessionStorage.setItem(key, JSON.stringify({ time: Date.now(), items })); } catch {}
+  // Abgelaufene Meldungen anderer Coins entfernen, damit der Browser-Speicher nicht vollläuft
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('krypto-markt-news:') && Date.now() - (read(k)?.time ?? 0) > NEWS_TTL_MS) localStorage.removeItem(k);
+    }
+  } catch {}
+  write(key, { time: Date.now(), items });
   return items;
 }
 
@@ -126,6 +149,11 @@ export const marketNews = () => newsRequest('/search?q=crypto&limit=30');
 export async function coinNews(name, symbol) {
   const items = await newsRequest(`/search?q=${encodeURIComponent(name)}&limit=30`);
   const escape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`\\b(${escape(name)}${symbol.length >= 3 ? '|' + escape(symbol) : ''})\\b`, 'i');
-  return items.filter((a) => pattern.test(`${a.title} ${a.description}`));
+  const byName = new RegExp(`\\b${escape(name)}\\b`, 'i');
+  // Das Kürzel zählt nur in Großschreibung – sonst passt „NEAR“ auf jedes „near“
+  const bySymbol = symbol.length >= 3 ? new RegExp(`\\b${escape(symbol.toUpperCase())}\\b`) : null;
+  return items.filter((a) => {
+    const text = `${a.title} ${a.description}`;
+    return byName.test(text) || !!bySymbol?.test(text);
+  });
 }
