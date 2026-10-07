@@ -199,6 +199,33 @@ export function regimeAt(btc, j, fng) {
   return { ...horizon(f), bear };
 }
 
+// Geglättete Marktphase: Mittel der letzten Tage. Ein einzelner schwacher Tag verschiebt die Bewertung
+// dadurch nur wenig. Die angezeigten Einzelfaktoren sind die von heute; fngAt(tag) liefert Fear & Greed je Tag.
+export function regimeSmooth(btc, j, fngAt = () => undefined, days = 7) {
+  const today = regimeAt(btc, j, fngAt(btc.days[j]));
+  if (today.score === null) return today;
+  let sum = today.score, n = 1;
+  for (let k = 1; k < days && j - k >= 0; k++) {
+    const r = regimeAt(btc, j - k, fngAt(btc.days[j - k]));
+    if (r.score !== null) { sum += r.score; n++; }
+  }
+  return { ...today, score: sum / n, today: today.score };
+}
+
+export const REGIME_DAYS = 14;
+
+// Was nach vergleichbaren Zyklus-Ständen in 12 Monaten geschah (2018–2026):
+// [Abstand zum Allzeithoch bis %, Bitcoin höher in % der Fälle, Bitcoin Median %, mittlerer Coin höher in %, mittlerer Coin Median %]
+const CYCLE_HISTORY = [[-70, 100, 95, 48, -7], [-55, 96, 109, 71, 26], [-40, 67, 97, 64, 24], [-25, 40, -30, 37, -58], [-10, 51, 11, 12, -43], [Infinity, 37, -17, 14, -61]];
+
+// Einordnung des Zyklus – die langfristige, antizyklische Sicht neben der kurzfristigen Marktphase
+export function cycleInfo(dd) {
+  const row = CYCLE_HISTORY.find(([limit]) => dd < limit) ?? CYCLE_HISTORY[CYCLE_HISTORY.length - 1];
+  const zone = dd <= -55 ? 'deep' : dd <= -40 ? 'low' : dd <= -10 ? 'mid' : 'high';
+  const label = { deep: 'Tief im Zyklus – antizyklische Kaufzone', low: 'Unteres Drittel des Zyklus', mid: 'Mitte des Zyklus', high: 'Nahe am Allzeithoch – Gewinne sichern' }[zone];
+  return { dd, zone, label, btcUp: row[1], btcMedian: row[2], altUp: row[3], altMedian: row[4] };
+}
+
 // Ersatz, falls keine Bitcoin-Tageskurse geladen werden konnten
 function regimeFromMarket(btc) {
   const d30 = btc?.price_change_percentage_30d_in_currency;
@@ -339,7 +366,13 @@ export function marketIndex(coins, btcInd, fng, news) {
   const top = coins.filter((c) => !isStable(c)).slice(0, 200);
   if (!btc || top.length < 20) return null;
 
-  const regime = btcInd ? regimeAt(btcInd, btcInd.n - 1, fng?.value) : regimeFromMarket(btc);
+  // Marktphase über 14 Tage geglättet, damit ein einzelner schwacher Tag nicht alle Bewertungen kippt
+  const lastDay = btcInd ? btcInd.days[btcInd.n - 1] : null;
+  const fngAt = (d) => fng?.byDay?.get(d) ?? (d === lastDay ? fng?.value : undefined);
+  const regime = btcInd ? regimeSmooth(btcInd, btcInd.n - 1, fngAt, REGIME_DAYS) : regimeFromMarket(btc);
+  // Stand im Zyklus: Abstand von Bitcoin zu seinem Allzeithoch
+  const cycle = isNum(btc.ath_change_percentage) ? cycleInfo(btc.ath_change_percentage) : null;
+  regime.cycle = cycle ? { dd: cycle.dd } : null;
   const share = (key) => {
     const vals = top.map((c) => c[key]).filter(isNum);
     return vals.length ? vals.filter((v) => v > 0).length / vals.length : 0.5;
@@ -347,9 +380,11 @@ export function marketIndex(coins, btcInd, fng, news) {
   const up7 = share('price_change_percentage_7d_in_currency');
   const up30 = share('price_change_percentage_30d_in_currency');
 
-  // Gewichte so umrechnen, dass die Faktoren der Marktphase zusammen 70 % ausmachen
-  const total = regime.factors.reduce((s, f) => s + f.weight, 0) || 1;
-  const parts = regime.factors.map((f) => ({ ...f, weight: f.weight / total * 0.7 }));
+  // Der Index rechnet mit der geglätteten Marktphase (70 %), der Marktbreite (20 %) und der Nachrichtenlage (10 %)
+  const smoothed = isNum(regime.today)
+    ? `Schnitt der letzten ${REGIME_DAYS} Tage; der heutige Tag allein läge bei ${signed(regime.today * 100, 0)}`
+    : 'aus der Bitcoin-Veränderung über 30 Tage';
+  const parts = regime.score === null ? [] : [factor('Marktphase (Bitcoin)', smoothed, regime.score, 0.7)];
   parts.push(factor('Marktbreite', `${num(up7 * 100, 0)} % der Top 200 im Plus über 7 Tage, ${num(up30 * 100, 0)} % über 30 Tage`, clamp((up7 + up30 - 1) * 1.5), 0.2));
   if (news && news.score !== null) parts.push(factor('Nachrichtenlage', news.text, news.score, 0.1));
 
@@ -360,7 +395,7 @@ export function marketIndex(coins, btcInd, fng, news) {
   else if (value <= 32) [signal, label] = ['sell', 'Verkaufen'];
   else if (value <= 43) [signal, label] = ['sell', 'Eher verkaufen'];
   else [signal, label] = ['hold', 'Halten'];
-  return { value, signal, label, parts, regime };
+  return { value, signal, label, parts, regime, cycle };
 }
 
 // ---------- Nachrichten ----------
@@ -403,7 +438,7 @@ export function backtest(ind, btcInd, fngByDay, days) {
     const j = btcIndex?.get(ind.days[i]);
     if (btcIndex && j === undefined) continue;
     const s = scoreAt(ind, i);
-    const regime = btcInd ? regimeAt(btcInd, j, fngByDay?.get(ind.days[i])) : horizon([]);
+    const regime = btcInd ? regimeSmooth(btcInd, j, (d) => fngByDay?.get(d), REGIME_DAYS) : horizon([]);
     const raw = totalScore(s.short, s.medium, s.long, regime);
     if (raw === null) continue;
     const [signal] = signalOf(Math.round(raw * 100));

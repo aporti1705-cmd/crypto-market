@@ -388,6 +388,7 @@ function marketView() {
       <div class="panel gauge-panel" id="g-fng"></div>
       <div class="panel" id="market-parts"></div>
     </section>
+    <section class="panel" id="cycle"></section>
     <section>
       <h2>Stärkste Kaufsignale</h2>
       <p class="hint">Coins aus den Top 500 mit ausreichend Handelsvolumen, sortiert nach Prognose-Score – riskantere Coins werden dabei abgewertet.</p>
@@ -441,8 +442,21 @@ function marketView() {
     const m = state.market;
     $('#g-market').innerHTML = m ? `<div class="label">Jetzt kaufen?</div>${gauge(m.value, SELL_TO_BUY)}
         <div class="gauge-value">${m.value}<small> / 100</small></div>${badge(m, 'big')}
-        <div class="hint">${NOW_ANSWER[m.label]}<br>Berechnet um ${m.time.toLocaleTimeString('de-DE')} aus den aktuellen Kursen</div>`
+        <div class="hint">${NOW_ANSWER[m.label]}<br>Sicht: nächste Wochen · über 14 Tage geglättet<br>Berechnet um ${m.time.toLocaleTimeString('de-DE')} aus den aktuellen Kursen</div>`
       : '<div class="label">Jetzt kaufen?</div><p class="muted">Wird berechnet …</p>';
+    const cy = m?.cycle;
+    $('#cycle').hidden = !cy;
+    if (cy) {
+      $('#cycle').className = `panel cycle ${cy.zone}`;
+      $('#cycle').innerHTML = `<div class="panel-top"><div><div class="label">Zyklus – Sicht auf 12 Monate</div><h2>${esc(cy.label)}</h2></div>
+          <strong class="cycle-dd">${num(-cy.dd, 0)} %<small> unter Allzeithoch</small></strong></div>
+        <p>Bitcoin liegt ${num(-cy.dd, 0)} % unter seinem Allzeithoch. Aus vergleichbaren Ständen seit 2018 stand Bitcoin ein Jahr später
+          in <strong>${cy.btcUp} %</strong> der Fälle höher (mittleres Ergebnis ${signed(cy.btcMedian, 0)} %), ein durchschnittlicher Coin in
+          <strong>${cy.altUp} %</strong> der Fälle (${signed(cy.altMedian, 0)} %).</p>
+        <p class="hint">Antizyklisch gilt: Je tiefer unter dem Hoch, desto besser waren die Einstiege auf Jahressicht – nahe am Hoch waren sie am schlechtesten.
+          Das ist die langfristige Sicht; „Jetzt kaufen?“ oben bewertet die nächsten Wochen und folgt dem Trend. Beides zusammen bestimmt den Reserve-Vorschlag.
+          Grundlage sind nur zwei Marktzyklen – eine Tendenz, keine Gewissheit.</p>`;
+    }
     const f = state.fng;
     $('#g-fng').innerHTML = f ? `<div class="label">Fear &amp; Greed Index</div>${gauge(f.value, SELL_TO_BUY)}
         <div class="gauge-value">${f.value}<small> / 100</small></div><span class="badge none big">${fngLabel(f.value)}</span>
@@ -450,6 +464,7 @@ function marketView() {
       : '<div class="label">Fear &amp; Greed Index</div><p class="muted">Wird geladen …</p>';
     $('#market-parts').innerHTML = m ? `<div class="label">So setzt sich der Markt-Index zusammen</div>
         ${factorList(m.parts)}
+        <details><summary>Heutige Einzelwerte der Marktphase</summary>${factorList(m.regime.factors)}</details>
         <p class="hint">0 = klar verkaufen, 50 = neutral, 100 = klar kaufen. Der Index fließt als Marktphase in jede Coin-Prognose ein.</p>`
       : '<div class="label">Markt-Index</div><p class="muted">Wird berechnet …</p>';
   }
@@ -737,7 +752,7 @@ function detailView(id) {
         Die Punkte je Faktor reichen von −100 (klar negativ) bis +100 (klar positiv).</p>
       ${a.notes.map((n) => `<p class="notice">${esc(n)}</p>`).join('')}
       <div class="h-cards">${card('Kurzfristig', 'bis 1 Woche', a.short)}${card('Mittelfristig', '2–4 Wochen', a.medium)}
-        ${card('Langfristig', '1–3 Monate', a.long)}${card('Marktphase', 'gilt für alle Coins', a.regime)}</div>
+        ${card('Langfristig', '1–3 Monate', a.long)}${card('Marktphase', 'gilt für alle Coins · Schnitt aus 14 Tagen, Einzelwerte von heute', a.regime)}</div>
       ${extra}`;
   }
 
@@ -1440,6 +1455,8 @@ function portfolioView() {
       const p = plan({
         holdings: known.map((r) => ({ id: r.c.id, name: r.c.name, symbol: r.c.symbol, units: r.pos.amount, price: r.c.current_price, cost: r.unit, peak: r.peak, trimPrice: r.pos.trimPrice, analysis: r.c.analysis })),
         cash: depot.data.cash, candidates, regime: state.market.regime,
+        core: ['bitcoin', 'ethereum'].map((id) => state.byId.get(id)).filter((c) => c && isNum(c.current_price))
+          .map((c) => ({ id: c.id, name: c.name, symbol: c.symbol, price: c.current_price, analysis: c.analysis })),
         options: depot.data.reservePct === null ? { exposureCurve: EXPOSURE_CURVES[depot.data.reserveMode] } : { investShare: 1 - depot.data.reservePct / 100 },
       });
       advice = p ? { key, plan: p, time: new Date(), missing: rows.length - known.length } : null;
@@ -1487,12 +1504,13 @@ function portfolioView() {
         <ul class="plain">
           <li><strong>Feste Vorschläge:</strong> Sie werden einmal berechnet und bleiben stehen, bis du etwas am Portfolio änderst oder „Neu berechnen“ wählst.</li>
           <li><strong>Tauschen:</strong> Passen ein Verkauf und ein Kauf zusammen, schlägt der Manager einen direkten Tausch vor. Gerechnet wird mit zweimal 0,25 % Gebühr; tauscht deine Börse direkt in einem Schritt, ist es weniger.</li>
+          <li><strong>Antizyklisch im Kern:</strong> Der Reserve-Vorschlag hängt zur Hälfte am Zyklus (Abstand von Bitcoin zum Allzeithoch): tief unten wenig Reserve, nahe am Hoch viel. Liegt Bitcoin mehr als 40 % unter dem Hoch, werden Bitcoin und Ethereum auch ohne Kaufsignal aufgestockt und nicht per Stop verkauft.</li>
           <li><strong>Erst das Risiko:</strong> Die Reserve bestimmt, wie viel investiert sein soll. Der Vorschlag dafür kommt aus der Marktphase; du kannst ihn überschreiben.</li>
           <li><strong>Verkaufen, wenn Kurse fallen:</strong> Verkaufssignale werden verkauft. Fällt ein Coin 25 % unter sein Hoch seit dem Kauf, greift die Schutzregel – unabhängig vom Score.</li>
           <li><strong>Gewinner laufen lassen:</strong> Bei hohen Gewinnen wird ein Teil gesichert, wenn der Trend überdehnt ist.</li>
           <li><strong>Kein Klumpen:</strong> höchstens 20 % je Coin (Bitcoin und Ethereum 40 %, riskante Coins weniger), höchstens 8 Positionen.</li>
           <li><strong>Wenig handeln:</strong> Jeder Kauf und Verkauf kostet rund 0,25 %. Abweichungen unter 4 % des Portfolios bleiben liegen, getauscht wird nur bei mindestens 30 Punkten besserem Score.</li>
-          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> mit der ausgewogenen Reserve rund +64 % pro Jahr bei einem größten zwischenzeitlichen Rückgang von 48 %, mit der vorsichtigen rund +48 % bei 35 %. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
+          <li><strong>Rückrechnung 2018–2026 mit Gebühren:</strong> mit der ausgewogenen Reserve rund +64 % pro Jahr bei einem größten zwischenzeitlichen Rückgang von 49 %, mit der vorsichtigen rund +53 % bei 39 %. Eine rein antizyklische Reserve brachte nur rund +29 % pro Jahr, weil sie die Anstiege nahe am Hoch verpasst. Nur jeder dritte Monat endete im Plus; Verluste lassen sich nicht ausschließen, und echte Ergebnisse werden schlechter sein.</li>
           <li>Die Seite handelt nicht selbst. Du setzt die Schritte bei deiner Börse um und trägst sie hier als umgesetzt ein.</li>
         </ul>
       </details>

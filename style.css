@@ -190,6 +190,14 @@ tbody tr.coin:hover { background: var(--panel-2); }
 .pts { flex: 0 0 40px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
 .plain li { font-size: 14px; }
 
+.cycle { margin-top: 18px; border-left: 4px solid var(--muted); }
+.cycle.deep { border-left-color: var(--up); background: linear-gradient(135deg, var(--up-bg), var(--panel) 60%); }
+.cycle.low { border-left-color: var(--mild); }
+.cycle.high { border-left-color: var(--down); background: linear-gradient(135deg, var(--down-bg), var(--panel) 60%); }
+.cycle h2 { font-size: 19px; margin: 2px 0 0; }
+.cycle-dd { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+.cycle-dd small { display: block; font-size: 12px; font-weight: 500; color: var(--muted); }
+
 /* Portfolio */
 .alloc { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--panel-2); margin: 6px 0 12px; }
 .alloc i { display: block; min-width: 2px; }

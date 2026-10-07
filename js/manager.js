@@ -25,6 +25,12 @@ export const DEFAULTS = {
   trailStop: 0.25,        // Verkauf, wenn der Kurs so weit unter sein Hoch seit dem Kauf fällt
   stopLoss: null,         // Verkauf, wenn der Kurs so weit unter den Kaufpreis fällt
   pairSwaps: true,        // Verkäufe und Käufe als Tausch vorschlagen
+  // Grundlage des Reserve-Vorschlags: 'momentum' (Marktphase), 'cycle' (antizyklisch) oder 'blend' (je zur Hälfte).
+  // Rein antizyklisch brachte in der Rückrechnung nur rund 29 % pro Jahr, weil es die Anstiege nahe am Hoch verpasst;
+  // die Mischung lag gleichauf mit der reinen Marktphase, schwankt aber deutlich weniger von Tag zu Tag.
+  exposureBy: 'blend',
+  coreFill: true,         // tief im Zyklus Bitcoin und Ethereum auch ohne Kaufsignal aufstocken
+  coreFillDd: -40,        // ab diesem Abstand zum Allzeithoch gilt der Markt als tief im Zyklus
   profitRepeat: 1.3,      // erneute Gewinnmitnahme erst, wenn der Kurs seit der letzten um 30 % gestiegen ist
 };
 
@@ -37,8 +43,9 @@ export const adjusted = (a) => (a.score ?? 0) * RISK_WEIGHT[a.risk?.level ?? 2];
 
 // Investitionsquote je Marktphase: Stützpunkte [Score der Marktphase, Anteil investiert], dazwischen linear.
 // Beide Kurven wurden mit Gebühren über 2018–2026 zurückgerechnet (wöchentliche Prüfung, 86 Coins):
-//   ausgewogen: rund +64 % pro Jahr, größter zwischenzeitlicher Rückgang 48 %
-//   vorsichtig: rund +48 % pro Jahr, größter zwischenzeitlicher Rückgang 35 % (2022–2026: 20 % statt 42 %)
+//   ausgewogen: rund +64 % pro Jahr, größter zwischenzeitlicher Rückgang 49 %
+//   vorsichtig: rund +53 % pro Jahr, größter zwischenzeitlicher Rückgang 39 %
+// (jeweils zur Hälfte mit der antizyklischen Zyklus-Kurve gemischt, Marktphase über 14 Tage geglättet)
 // Die vorsichtige Kurve folgt dem halben Kelly-Anteil je Marktphase: Chance geteilt durch Schwankung der
 // 30-Tage-Ergebnisse. Feinere Unterschiede zwischen ähnlichen Kurven lagen im Rauschen der Rückrechnung.
 export const EXPOSURE_CURVES = {
@@ -47,8 +54,8 @@ export const EXPOSURE_CURVES = {
 };
 export const EXPOSURE_CURVE = EXPOSURE_CURVES.balanced;
 export const RESERVE_BACKTEST = {
-  balanced: { perYear: 64, drawdown: 48 },
-  cautious: { perYear: 48, drawdown: 35 },
+  balanced: { perYear: 64, drawdown: 49 },
+  cautious: { perYear: 53, drawdown: 39 },
 };
 
 // Was der Gesamtmarkt 30 Tage nach einer vergleichbaren Marktphase getan hat (alle 86 Coins, 2018–2026):
@@ -57,14 +64,23 @@ const PHASE_HISTORY = [[-0.2, 38, -27], [0, 45, -27], [0.2, 49, -25], [0.4, 50, 
 
 // Vorschläge für die Reserve in der aktuellen Marktphase, mit den Erfahrungswerten dazu
 export function reserveAdvice(regime) {
-  const pct = (curve) => Math.round((1 - exposureFor(regime, curve).share) * 100);
+  const pct = (curve) => Math.round((1 - suggestedExposure(regime, { ...DEFAULTS, exposureCurve: curve }).share) * 100);
   const r = regime?.score;
   const row = r === null || r === undefined ? null : PHASE_HISTORY.find(([limit]) => r < limit);
   return {
     balanced: pct(EXPOSURE_CURVES.balanced), cautious: pct(EXPOSURE_CURVES.cautious),
-    text: exposureFor(regime).text, bear: !!regime?.bear,
+    text: suggestedExposure(regime, DEFAULTS).text, bear: !!regime?.bear,
     history: row ? { up: row[1], worst: row[2] } : null,
   };
+}
+
+// Vorgeschlagene Investitionsquote nach den gewählten Einstellungen
+function suggestedExposure(regime, o) {
+  const dd = regime?.cycle?.dd;
+  const momentum = exposureFor(regime, o.exposureCurve, o.exposureBy === 'momentum' ? o.bearShare : 1);
+  if (o.exposureBy === 'momentum' || !Number.isFinite(dd)) return exposureFor(regime, o.exposureCurve, o.bearShare);
+  const cycle = cycleExposure(dd, o.exposureBy === 'blend' ? momentum.share : null, o.cycleCurve);
+  return { share: cycle.share, text: o.exposureBy === 'blend' ? `${momentum.text} ${cycle.text}` : cycle.text };
 }
 const BEAR_SHARE = 0.15;
 
@@ -77,6 +93,20 @@ function interpolate(x, pts) {
     }
   }
   return pts[pts.length - 1][1];
+}
+
+// Antizyklische Investitionsquote: [Abstand von Bitcoin zum Allzeithoch in %, Anteil investiert]
+export const CYCLE_CURVE = [[-70, 1], [-55, 0.9], [-40, 0.7], [-25, 0.4], [-10, 0.25], [0, 0.15]];
+
+function cycleExposure(dd, blendWith = null, curve = CYCLE_CURVE) {
+  let share = interpolate(dd, curve ?? CYCLE_CURVE);
+  if (blendWith !== null) share = (share + blendWith) / 2;
+  share = Math.round(share * 20) / 20;
+  const text = dd <= -55 ? 'Bitcoin steht tief unter seinem Allzeithoch – historisch die besten Einstiegsphasen.'
+    : dd <= -25 ? 'Bitcoin steht deutlich unter seinem Allzeithoch.'
+      : dd <= -10 ? 'Bitcoin nähert sich seinem Allzeithoch – Zeit, Gewinne schrittweise zu sichern.'
+        : 'Bitcoin steht nahe am Allzeithoch – historisch schlechte Einstiegsphasen, hohe Reserve.';
+  return { share, text };
 }
 
 // Wie viel des Portfolios investiert sein soll, abhängig von der Marktphase (in 5-%-Schritten)
@@ -99,7 +129,8 @@ const REVIEW_DAYS = { '1–3 Monate': 14, '2–4 Wochen': 7, 'bis 1 Woche': 3 };
 // cash: zusätzliches Guthaben in USD
 // candidates: Coins mit Kaufsignal, die noch nicht im Portfolio sind, gleiche Form ohne units/cost
 // regime: Marktphase aus dem Markt-Index
-export function plan({ holdings, cash = 0, candidates = [], regime, options = {}, now = Date.now() }) {
+// core: Bitcoin und Ethereum mit Kurs und Bewertung – für den antizyklischen Einstieg auch ohne Kaufsignal
+export function plan({ holdings, cash = 0, candidates = [], core = [], regime, options = {}, now = Date.now() }) {
   const o = { ...DEFAULTS, ...options };
   const stable = holdings.filter((h) => h.analysis?.stable);
   const coins = holdings.filter((h) => !h.analysis?.stable).map((h) => ({ ...h, value: h.units * h.price, held: true }));
@@ -109,7 +140,10 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   if (!(total > 0)) return null;
 
   // Vorschlag aus der Marktphase; eine selbst gewählte Reserve hat Vorrang
-  const suggested = exposureFor(regime, o.exposureCurve, o.bearShare);
+  const dd = regime?.cycle?.dd;
+  const suggested = suggestedExposure(regime, o);
+  // Tief im Zyklus: Bitcoin und Ethereum werden gehalten und aufgestockt, auch wenn der kurzfristige Trend negativ ist
+  const cheap = o.coreFill && Number.isFinite(dd) && dd <= o.coreFillDd;
   const exposure = Number.isFinite(o.investShare)
     ? { share: Math.min(1, Math.max(0, o.investShare)), custom: true,
       text: `Du hast eine Reserve von ${Math.round((1 - o.investShare) * 100)} % gewählt (Vorschlag: ${Math.round((1 - suggested.share) * 100)} %).` }
@@ -123,14 +157,15 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   // 1. Was vom Bestand bleibt: Verkaufssignal → nichts, sonst höchstens bis zur Obergrenze
   for (const c of coins) {
     c.adj = adjusted(c.analysis ?? {});
-    c.target = signal(c) === 'sell' ? 0 : Math.min(c.value, cap(c));
-    c.why = signal(c) === 'sell' ? 'signal' : c.value > cap(c) + minTrade ? 'cap' : null;
+    const sell = signal(c) === 'sell' && !(cheap && CORE.has(c.id));
+    c.target = sell ? 0 : Math.min(c.value, cap(c));
+    c.why = sell ? 'signal' : c.value > cap(c) + minTrade ? 'cap' : null;
   }
 
   // 1b. Schutz bei fallenden Kursen: Fällt ein Coin deutlich unter sein Hoch seit dem Kauf oder unter den
   // Kaufpreis, wird verkauft – unabhängig vom Score
   for (const c of coins) {
-    if (c.target === 0) continue;
+    if (c.target === 0 || (cheap && CORE.has(c.id))) continue;
     const fromPeak = c.peak ? c.price / c.peak - 1 : null;
     const fromCost = c.cost ? c.price / c.cost - 1 : null;
     if (o.trailStop && fromPeak !== null && fromPeak <= -o.trailStop) { c.target = 0; c.why = 'stop'; c.drop = fromPeak; c.dropFrom = 'seinem Hoch seit dem Kauf'; }
@@ -182,6 +217,15 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
   }
 
   const buyers = [...kept.filter((c) => signal(c) === 'buy' && c.target > 0 && !c.why), ...entries];
+  if (cheap) {
+    for (const k of core) {
+      let c = coins.find((h) => h.id === k.id) ?? entries.find((e) => e.id === k.id);
+      if (!c) { c = { ...k, units: 0, value: 0, target: 0, held: false, adj: adjusted(k.analysis ?? {}) }; entries.push(c); }
+      if (c.why) continue;
+      c.coreBuy = true; c.adj = Math.max(c.adj, 25);
+      if (!buyers.includes(c)) buyers.push(c);
+    }
+  }
   let free = budget - coins.reduce((s, c) => s + c.target, 0);
   // Verteilung nach Score; was über die Obergrenze hinausginge, fließt an die übrigen
   const distribute = () => {
@@ -258,7 +302,11 @@ export function plan({ holdings, cash = 0, candidates = [], regime, options = {}
         reason: `${exposure.text} Gekürzt wird zuerst, was den schwächsten Score hat (${fmt(score(c))}).`,
         horizon: 'In den nächsten Tagen umsetzen.', review: review(7), reviewText: 'In einer Woche prüfen, ob sich die Marktphase gebessert hat.' });
     } else {
-      moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
+      if (c.coreBuy && signal(c) !== 'buy') moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
+        goal: 'Antizyklisch einsteigen, solange der Markt tief im Zyklus steht.',
+        reason: `Bitcoin liegt ${Math.round(-dd)} % unter seinem Allzeithoch. Aus solchen Phasen stand Bitcoin ein Jahr später in der Vergangenheit fast immer höher – kurzfristig kann der Kurs aber weiter fallen.`,
+        horizon: 'Haltedauer: mindestens 12 Monate.', review: review(30), reviewText: 'In Raten kaufen und monatlich prüfen.' });
+      else moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
         goal: c.held ? 'Eine starke Position ausbauen, solange das Kaufsignal steht.' : 'Freie Reserve in einen Coin mit starkem Signal investieren.',
         reason: `Kaufsignal (Score ${fmt(score(c))}, Risiko ${a.risk?.label ?? 'unbekannt'}). ${factorHint(a)}`,
         horizon: `Haltedauer: ${a.horizon ?? '2–4 Wochen'}.`, review: review(REVIEW_DAYS[a.horizon] ?? 7) });

@@ -66,7 +66,8 @@ const coins = await markets();
 console.log(`${coins.length} Coins geladen`);
 
 const fngData = await optional('Fear & Greed', async () => (await getJson('https://api.alternative.me/fng/?limit=31', { tries: 2, wait: 5000 })).data);
-const fng = fngData ? { value: Number(fngData[0].value), week: Number(fngData[7]?.value), month: Number(fngData[29]?.value) } : null;
+const fng = fngData ? { value: Number(fngData[0].value), week: Number(fngData[7]?.value), month: Number(fngData[29]?.value),
+  byDay: new Map(fngData.map((d) => [Math.floor(Number(d.timestamp) / 86400), Number(d.value)])) } : null;
 
 const news = await optional('Nachrichten', async () => {
   const json = await getJson('https://cryptocurrency.cv/api/search?q=crypto&limit=30', { tries: 1 });
@@ -104,8 +105,8 @@ console.log(`${refined} Coins mit Tageskursen verfeinert`);
 const snapshot = {
   version: 1,
   time: Date.now(),
-  market: { value: market.value, signal: market.signal, label: market.label, parts: market.parts, regime },
-  fng,
+  market: { value: market.value, signal: market.signal, label: market.label, parts: market.parts, regime, cycle: market.cycle },
+  fng: fng ? { value: fng.value, week: fng.week, month: fng.month } : null,
   coins: coins.map((c) => {
     const out = {};
     for (const f of FIELDS) out[f] = c[f];
