@@ -320,6 +320,30 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
     risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes };
 }
 
+// Starker Tagesrückgang. Auswertung 2018–2026: Fiel ein Coin an einem Tag um mehr als 20 %, stand er 3 Tage
+// später in 69 % der Fälle höher (bei 12–20 %: 58 %, bei weniger als 8 %: kein Vorteil). Das galt nur, wenn der
+// ganze Markt mitfiel – fiel ein Coin allein, ging es meist weiter abwärts (nach 7 Tagen nur in rund 40 % höher).
+const DIP = [[-25, 1], [-20, 0.9], [-12, 0.4], [-8, 0.1], [-5, 0], [100, 0]];
+const DIP_ALONE = -10;     // so viel schlechter als der Markt gilt als Absturz aus eigenem Grund
+const DIP_WEIGHT = 0.5;
+
+function dipFactor(c, marketDay) {
+  const h24 = c.price_change_percentage_24h_in_currency ?? c.price_change_percentage_24h;
+  if (!isNum(h24) || h24 > -8) return null;
+  const market = isNum(marketDay) ? marketDay : null;
+  if (market !== null && h24 - market <= DIP_ALONE) {
+    return factor('Tagesrückgang', `${signed(h24)} % an einem Tag, der Gesamtmarkt nur ${signed(market)} % – fällt ein Coin allein, steckt oft eine schlechte Nachricht dahinter`, -0.4, DIP_WEIGHT);
+  }
+  const score = curve(h24, DIP);
+  return score > 0 ? factor('Tagesrückgang', `${signed(h24)} % an einem Tag${market !== null ? ` (Gesamtmarkt ${signed(market)} %)` : ''} – nach solchen Ausverkäufen folgte in den nächsten Tagen oft eine Gegenbewegung`, score, DIP_WEIGHT) : null;
+}
+
+// Kurzfristiger Baustein samt Tagesrückgang, falls einer vorliegt
+const withDip = (short, c, regime) => {
+  const dip = dipFactor(c, regime?.marketDay);
+  return dip ? horizon([...short.factors, dip]) : short;
+};
+
 export function quickAnalyse(c, regime) {
   if (isStable(c)) return none('Stablecoin', 'Der Kurs ist an einen festen Wert gebunden – keine Prognose nötig.', true);
   const prices = sparkline(c);
@@ -347,7 +371,7 @@ export function quickAnalyse(c, regime) {
   ];
 
   const volDaily = prices.length >= 60 ? stdev(logReturns(prices)) * Math.sqrt(24) * 100 : null;
-  return assemble(c, horizon(short), horizon(medium), horizon(long), regime, volDaily);
+  return assemble(c, withDip(horizon(short), c, regime), horizon(medium), horizon(long), regime, volDaily);
 }
 
 // Verfeinerte Bewertung mit Tageskursen (bis zu 4 Jahre) und Nachrichten
@@ -356,7 +380,9 @@ export function detailAnalyse(c, ind, regime, news) {
   if (quick.stable || ind.n < 30) return quick;
   const s = scoreAt(ind, ind.n - 1);
   const pick = (a, b) => (a.score !== null ? a : b);
-  return assemble(c, pick(s.short, quick.short), pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
+  // quick.short enthält den Tagesrückgang schon; der Baustein aus Tageskursen bekommt ihn hier dazu
+  const short = s.short.score !== null ? withDip(s.short, c, regime) : quick.short;
+  return assemble(c, short, pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
 }
 
 // ---------- Marktindex ----------
@@ -373,6 +399,9 @@ export function marketIndex(coins, btcInd, fng, news) {
   // Stand im Zyklus: Abstand von Bitcoin zu seinem Allzeithoch
   const cycle = isNum(btc.ath_change_percentage) ? cycleInfo(btc.ath_change_percentage) : null;
   regime.cycle = cycle ? { dd: cycle.dd } : null;
+  // Tagesbewegung des Gesamtmarkts: mittlere 24-Stunden-Veränderung der größten Coins
+  const day = top.map((c) => c.price_change_percentage_24h_in_currency).filter(isNum).sort((a, b) => a - b);
+  regime.marketDay = day.length ? day[Math.floor(day.length / 2)] : null;
   const share = (key) => {
     const vals = top.map((c) => c[key]).filter(isNum);
     return vals.length ? vals.filter((v) => v > 0).length / vals.length : 0.5;

@@ -158,8 +158,11 @@ export function plan({ holdings, cash = 0, candidates = [], core = [], regime, o
   for (const c of coins) {
     c.adj = adjusted(c.analysis ?? {});
     const sell = signal(c) === 'sell' && !(cheap && CORE.has(c.id));
-    c.target = sell ? 0 : Math.min(c.value, cap(c));
-    c.why = sell ? 'signal' : c.value > cap(c) + minTrade ? 'cap' : null;
+    // Liegt eine Position nur knapp über der Obergrenze, bleibt sie unangetastet. Sonst entstünden Kürzungen
+    // unter der Handelsschwelle, die nie ausgeführt werden, deren Erlös aber schon verplant wäre.
+    const over = c.value > cap(c) + minTrade;
+    c.target = sell ? 0 : over ? cap(c) : c.value;
+    c.why = sell ? 'signal' : over ? 'cap' : null;
   }
 
   // 1b. Schutz bei fallenden Kursen: Fällt ein Coin deutlich unter sein Hoch seit dem Kauf oder unter den
