@@ -516,7 +516,32 @@ export function detailAnalyse(c, ind, regime, news) {
   const pick = (a, b) => (a.score !== null ? a : b);
   // quick.short enthält den Tagesrückgang schon; der Baustein aus Tageskursen bekommt ihn hier dazu
   const short = s.short.score !== null ? withDip(s.short, c, regime) : quick.short;
-  return assemble(c, short, pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
+  const a = assemble(c, short, pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
+  if (a.signal !== 'none') a.trade = tradeSetup(c, a, ind, regime);
+  return a;
+}
+
+// ---------- Kurzfristige Handelsmuster ----------
+// Geprüft an Tageskerzen mit Hoch und Tief (84 Coins, 2018–2026), mit 0,5 % Gebühren je Handel und getrennt nach
+// zwei Zeiträumen. Ziel und Stopp sind Vielfache der Tagesschwankung des Coins; trifft eine Kerze beides, zählt
+// der Stopp. Aufgenommen sind nur Muster, die in beiden Zeiträumen im Plus lagen – je Handel und je Signaltag.
+// hit/avg: Anteil der Signaltage im Plus und mittlerer Ertrag je Signaltag (Mittel beider Zeiträume).
+// Kein Short-Muster bestand diese Prüfung (Verkaufs-Score, Bruch des 20-Tage-Tiefs, starke Anstiege).
+export const TRADE_SETUPS = {
+  selloff: { label: 'Erholung nach Wochen-Ausverkauf', target: 2, stop: 3, days: 7, hit: 63, avg: 1.9, cases: 2385 },
+  score: { label: 'Sehr starker Score', target: 2, stop: 3, days: 7, hit: 64, avg: 1.1, cases: 5728 },
+};
+export const TRADE_LIMITS = { selloff: -25, score: 40 };
+
+function tradeSetup(c, a, ind, regime) {
+  const i = ind.n - 1, sw = ind.swing[i], r7 = retAt(ind, i, 7);
+  if (!isNum(sw) || sw < 1.5 || sw > 10 || !isNum(c.current_price)) return null;
+  const kind = r7 !== null && r7 <= TRADE_LIMITS.selloff && !regime.bear ? 'selloff' : a.score >= TRADE_LIMITS.score ? 'score' : null;
+  const info = { swing: r1(sw), r7: r7 === null ? null : r1(r7) };
+  if (!kind) return { ...info, kind: null };
+  const s = TRADE_SETUPS[kind], entry = c.current_price;
+  return { ...info, kind, side: 'long', entry, targetPct: r1(s.target * sw), stopPct: r1(s.stop * sw),
+    target: entry * (1 + s.target * sw / 100), stop: entry * (1 - s.stop * sw / 100), days: s.days, time: Date.now() };
 }
 
 // ---------- Marktindex ----------

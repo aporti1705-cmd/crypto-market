@@ -422,3 +422,14 @@ textarea { background: var(--panel); color: var(--text); border: 1px solid var(-
 .fc-range { font-size: 12px; white-space: nowrap; }
 .reasons { margin-top: 18px; }
 .reasons h3 { margin: 0 0 4px; font-size: 15px; }
+
+/* Daytrading */
+.trades { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px; }
+.trade .coin-cell { text-decoration: none; color: inherit; }
+.trade-why { margin-top: 10px; font-weight: 600; }
+.trade-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; margin: 14px 0 0; }
+.trade-grid dt { font-size: 12px; color: var(--muted); }
+.trade-grid dd { margin: 2px 0 0; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.trade-grid dd.muted { font-size: 12px; font-weight: 500; }
+.trade-status { margin: 14px 0 0; font-weight: 700; }
+#t-watch .coin-cell { text-decoration: none; color: inherit; }

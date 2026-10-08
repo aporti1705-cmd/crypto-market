@@ -3,7 +3,7 @@ import * as api from './api.js';
 import * as pf from './portfolio.js';
 import * as auth from './auth.js';
 import { plan, applyMove, adjusted, reserveAdvice, EXPOSURE_CURVES, RESERVE_BACKTEST } from './manager.js';
-import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews } from './model.js';
+import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews, TRADE_SETUPS, TRADE_LIMITS } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
 const PAGE_INTERVAL_MS = 30_000;
@@ -904,6 +904,84 @@ const SYNC_TEXT = {
   synced: 'In deinem Konto gespeichert – auf jedem Gerät abrufbar, auf dem du dich anmeldest.',
 };
 
+// ---------- Daytrading ----------
+
+function tradingView() {
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Daytrading</h1>
+      <p class="hint">Kurzfristige Vorschläge mit Einstieg, Ziel und Stopp – nur wenn ein geprüftes Muster vorliegt. An vielen Tagen bleibt die Liste leer.</p></div></div>
+    <section id="t-long"></section>
+    <section id="t-short"></section>
+    <section id="t-watch"></section>
+    <section class="panel" id="t-rules"></section>`;
+
+  const coinCell = (c) => `<a class="coin-cell" href="#/coin/${encodeURIComponent(c.id)}"><img src="${esc(c.image)}" alt="" loading="lazy">
+      <div><div class="coin-name">${esc(c.name)}</div><div class="coin-sym">${esc(c.symbol)} · #${c.market_cap_rank ?? '–'}</div></div></a>`;
+  const liquid = (c) => c.total_volume >= 2e6 && !DERIVATIVE.test(c.name);
+
+  // Wo steht der Kurs gegenüber dem Vorschlag? Zu weit gelaufen oder unter dem Stopp gilt er nicht mehr.
+  function status(c, t) {
+    const p = c.current_price, done = (p - t.entry) / (t.target - t.entry);
+    if (p <= t.stop) return ['down', 'Stopp erreicht – nicht mehr einsteigen'];
+    if (p >= t.target) return ['up', 'Ziel erreicht – Gewinn mitnehmen'];
+    if (done > 0.35) return ['', 'schon gelaufen – nicht mehr nachkaufen'];
+    return ['up', 'Einstieg jetzt möglich'];
+  }
+
+  function update() {
+    const list = state.coins.filter((c) => c.analysis.trade?.kind && liquid(c))
+      .sort((a, b) => (a.analysis.trade.kind === b.analysis.trade.kind ? b.analysis.score - a.analysis.score : a.analysis.trade.kind === 'selloff' ? -1 : 1));
+    const bear = state.market?.regime?.bear;
+    $('#t-long').innerHTML = `<h2>Long – auf steigende Kurse</h2>` + (list.length ? `<div class="trades">${list.map((c) => {
+      const t = c.analysis.trade, s = TRADE_SETUPS[t.kind], [cls, text] = status(c, t);
+      const until = new Date(t.time + t.days * 86_400_000).toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+      return `<div class="panel trade">
+        <div class="panel-top">${coinCell(c)}<span class="badge buy">Long</span></div>
+        <div class="trade-why">${esc(s.label)}${t.kind === 'selloff' ? ` · ${signed(t.r7, 0)} % in 7 Tagen` : ` · Score ${signed(c.analysis.score, 0)}`}</div>
+        <dl class="trade-grid">
+          <div><dt>Einstieg</dt><dd>${money(t.entry)}</dd><dd class="muted">jetzt ${money(c.current_price)}</dd></div>
+          <div><dt>Ziel – verkaufen bei</dt><dd class="up">${money(t.target)}</dd><dd class="muted">+${num(t.targetPct, 1)} %</dd></div>
+          <div><dt>Stopp – aussteigen bei</dt><dd class="down">${money(t.stop)}</dd><dd class="muted">−${num(t.stopPct, 1)} %</dd></div>
+          <div><dt>Spätestens verkaufen</dt><dd>${until}</dd><dd class="muted">nach ${t.days} Tagen, egal wo der Kurs steht</dd></div></dl>
+        <p class="trade-status ${cls}">${text}</p>
+        <p class="hint">Rückblick: Solche Signale lagen an ${s.hit} % der Signaltage im Plus, im Mittel ${signed(s.avg, 1)} % je Handel nach Gebühren.
+          Das Ziel liegt näher als der Stopp – ein Verlust wiegt also schwerer als ein Gewinn. Je Handel höchstens einen kleinen Teil des Kapitals einsetzen.</p>
+      </div>`; }).join('')}</div>`
+      : `<div class="panel"><p><strong>Heute kein Long-Vorschlag.</strong></p>
+          <p class="muted">${state.coins.length ? `Kein Coin erfüllt im Moment eines der beiden geprüften Muster${bear ? ' – im Bärenmarkt entfällt das Ausverkaufs-Muster ganz' : ''}. Lieber kein Handel als ein unbegründeter.` : 'Lade Kurse …'}</p></div>`);
+
+    $('#t-short').innerHTML = `<h2>Short – auf fallende Kurse</h2><div class="panel"><p><strong>Kein Short-Vorschlag.</strong></p>
+      <p class="muted">Ich habe sieben Short-Muster über 8 Jahre geprüft (Verkaufs-Score, Bruch des 20-Tage-Tiefs, Coin fällt allein, starker Tages- und Wochenanstieg).
+        Keines lag in beiden Prüfzeiträumen verlässlich im Plus; nach starken Anstiegen verlor ein Short im Mittel sogar 1–2 % je Handel.
+        Solange kein Muster die Prüfung besteht, erscheint hier bewusst nichts.</p></div>`;
+
+    // Beobachtungsliste: was einem Muster am nächsten kommt
+    const near = state.coins.filter((c) => c.analysis.trade && !c.analysis.trade.kind && liquid(c)).map((c) => {
+      const t = c.analysis.trade;
+      const drop = t.r7 !== null && t.r7 <= -15 ? { gap: (TRADE_LIMITS.selloff - t.r7) / -10, text: `${signed(t.r7, 0)} % in 7 Tagen – Muster ab ${TRADE_LIMITS.selloff} %` } : null;
+      const strong = c.analysis.score >= 28 ? { gap: (TRADE_LIMITS.score - c.analysis.score) / 12, text: `Score ${signed(c.analysis.score, 0)} – Muster ab +${TRADE_LIMITS.score}` } : null;
+      const best = [drop, strong].filter(Boolean).sort((a, b) => a.gap - b.gap)[0];
+      return best ? { c, ...best } : null;
+    }).filter(Boolean).sort((a, b) => a.gap - b.gap).slice(0, 8);
+    $('#t-watch').innerHTML = `<h2>Beobachtungsliste</h2><p class="hint">Noch kein Signal – diese Coins sind einem Muster am nächsten.</p>` + (near.length
+      ? `<div class="table-wrap"><table><thead><tr><th class="col-coin">Coin</th><th class="num">Kurs</th><th class="num">24 h</th><th>Stand</th></tr></thead>
+          <tbody>${near.map(({ c, text }) => `<tr><td class="col-coin">${coinCell(c)}</td><td class="num">${money(c.current_price)}</td>
+            <td class="num">${pct(c.price_change_percentage_24h_in_currency)}</td><td>${esc(text)}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="panel"><p class="muted">Im Moment ist kein Coin in der Nähe eines Musters.</p></div>');
+
+    const row = (s, when) => `<li><strong>${esc(s.label)}:</strong> ${when} Ziel ${s.target}-fache, Stopp ${s.stop}-fache Tagesschwankung des Coins, höchstens ${s.days} Tage.
+      Rückblick über ${num(s.cases, 0)} Fälle: an ${s.hit} % der Signaltage im Plus, im Mittel ${signed(s.avg, 1)} % je Handel.</li>`;
+    $('#t-rules').innerHTML = `<h2>So entstehen die Vorschläge</h2>
+      <ul class="plain">${row(TRADE_SETUPS.selloff, `Der Coin ist in 7 Tagen um mindestens ${-TRADE_LIMITS.selloff} % gefallen und es herrscht kein Bärenmarkt.`)}
+        ${row(TRADE_SETUPS.score, `Der Prognose-Score liegt bei mindestens +${TRADE_LIMITS.score}.`)}</ul>
+      <p class="hint">Geprüft an Tageskursen von 84 Coins seit 2018, mit 0,5 % Gebühren je Handel, in zwei getrennten Zeiträumen. Nur Coins mit Tageskursen von Binance und genug Handelsvolumen.
+        Die Vorschläge gelten für Tage, nicht für Minuten: Für echtes Handeln im Minutentakt gibt es hier keine geprüfte Grundlage.</p>
+      <p class="notice">Sicher ist kein Handel. Rund jeder dritte Vorschlag endete im Rückblick mit Verlust, und weil der Stopp weiter entfernt liegt als das Ziel, ist ein Verlust größer als ein Gewinn.
+        Die Rückrechnung enthält nur Coins, die heute noch gehandelt werden – echte Ergebnisse fallen schlechter aus. Keine Anlageberatung.</p>`;
+  }
+  return { update };
+}
+
 // gate: Die Ansicht steht anstelle des Portfolios, solange niemand angemeldet ist
 function accountView(gate = false) {
   let shown = null, message = '', busy = false;
@@ -1560,13 +1638,14 @@ function portfolioView() {
 
 function route() {
   const [name, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const section = name === 'portfolio' ? 'portfolio' : name === 'konto' ? 'account' : 'market';
+  const section = name === 'portfolio' ? 'portfolio' : name === 'konto' ? 'account' : name === 'daytrading' ? 'trading' : 'market';
   for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', a.dataset.nav === section);
   let id = arg;
   try { id = decodeURIComponent(arg ?? ''); } catch { /* fehlerhafte Adresse – unverändert verwenden */ }
   if (name === 'coin' && id) current = detailView(id);
   else if (name === 'portfolio') current = depot.user ? portfolioView() : accountView(true);
   else if (name === 'konto') current = accountView();
+  else if (name === 'daytrading') current = tradingView();
   else current = marketView();
   current.update();
   window.scrollTo(0, 0);
