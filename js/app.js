@@ -389,6 +389,7 @@ function marketView() {
       <div class="panel" id="market-parts"></div>
     </section>
     <section class="panel" id="cycle"></section>
+    <section class="panel" id="market-forecast" hidden></section>
     <section>
       <h2>Stärkste Kaufsignale</h2>
       <p class="hint">Coins aus den Top 500 mit ausreichend Handelsvolumen, sortiert nach Prognose-Score – riskantere Coins werden dabei abgewertet.</p>
@@ -456,6 +457,19 @@ function marketView() {
         <p class="hint">Antizyklisch gilt: Je tiefer unter dem Hoch, desto besser waren die Einstiege auf Jahressicht – nahe am Hoch waren sie am schlechtesten.
           Das ist die langfristige Sicht; „Jetzt kaufen?“ oben bewertet die nächsten Wochen und folgt dem Trend. Beides zusammen bestimmt den Reserve-Vorschlag.
           Grundlage sind nur zwei Marktzyklen – eine Tendenz, keine Gewissheit.</p>`;
+    }
+    const fc = m?.forecast;
+    $('#market-forecast').hidden = !fc;
+    if (fc) {
+      const cell = (s) => (s ? `<td class="num"><strong class="${tone(Math.round(s.mid))}">${signed(s.mid, Math.abs(s.mid) < 10 ? 1 : 0)} %</strong>
+        <div class="muted fc-range">${signed(s.low, 0)} … ${signed(s.high, 0)} %</div>${isNum(s.up) ? `<div class="muted fc-range">höher in ${s.up} %</div>` : ''}</td>` : '<td class="num muted">–</td>');
+      const row = (label, hint, f) => `<tr><td><strong>${label}</strong><div class="muted fc-range">${hint}</div></td>${cell(f.short)}${cell(f.medium)}${cell(f.long)}</tr>`;
+      $('#market-forecast').innerHTML = `<div class="label">Prognose für den Gesamtmarkt</div>
+        <div class="table-wrap"><table class="fc-table"><thead><tr><th></th><th class="num">7 Tage</th><th class="num">30 Tage</th><th class="num">12 Monate</th></tr></thead>
+          <tbody>${row('Bitcoin', 'Leitwährung', fc.btc)}${row('Mittlerer Coin', 'typischer Altcoin', fc.alt)}</tbody></table></div>
+        <p class="hint">Fett: das mittlere Ergebnis nach vergleichbaren Marktlagen seit 2018. Darunter die Spanne, in der die Hälfte der Fälle lag –
+          jeder vierte Fall lag darüber, jeder vierte darunter. 7 und 30 Tage hängen an der Marktphase, 12 Monate am Stand im Zyklus.
+          Der mittlere Coin schnitt auf Jahressicht meist schlechter ab als Bitcoin.</p>`;
     }
     const f = state.fng;
     $('#g-fng').innerHTML = f ? `<div class="label">Fear &amp; Greed Index</div>${gauge(f.value, SELL_TO_BUY)}
@@ -724,6 +738,26 @@ function detailView(id) {
         <span class="outlook ${tone(h.score === null || Math.abs(h.score) <= 0.12 ? 0 : h.score)}">${outlook(h.score)}</span></div>
       ${factorList(h.factors)}</div>`;
 
+    const fcast = a.forecast;
+    const fbox = (title, s) => (s ? `<div><div class="label">${title}</div>
+        <div class="value ${tone(Math.round(s.mid))}">${signed(s.mid, Math.abs(s.mid) < 10 ? 1 : 0)} %</div>
+        <div class="muted">Spanne ${signed(s.low, 0)} … ${signed(s.high, 0)} %</div>
+        ${isNum(s.up) ? `<div class="muted">höher in ${s.up} % der Fälle</div>` : ''}
+        <div class="muted">≈ ${money(c.current_price * (1 + s.mid / 100))} (${money(c.current_price * (1 + s.low / 100))} – ${money(c.current_price * (1 + s.high / 100))})</div></div>`
+      : `<div><div class="label">${title}</div><div class="value muted">–</div></div>`);
+    const why = a.reasons;
+    const reasonList = (list) => list.map((f) => `<li><strong class="${tone(f.points)}">${signed(f.points, 0)}</strong> ${esc(f.name)} <span class="muted">(${f.horizon})</span>: ${esc(f.text)}</li>`).join('');
+    const percent = !fcast ? '' : `<section class="panel"><h2>Kursprognose in Prozent</h2>
+        <div class="stat-grid">${fbox('In 7 Tagen', fcast.short)}${fbox('In 30 Tagen', fcast.medium)}${fbox('In 12 Monaten', fcast.long)}</div>
+        <p class="hint">Die große Zahl ist das mittlere Ergebnis, das Coins mit diesem Score und dieser Schwankung seit 2018 erreicht haben – gemessen vom jetzigen Kurs.
+          In der Spanne lag die Hälfte der Fälle; jeder vierte Fall lag darüber, jeder vierte darunter. Auf 12 Monate zählt vor allem der Stand im Zyklus,
+          dort ist die Unsicherheit am größten (nur zwei Marktzyklen als Grundlage).</p>
+        ${why && (why.pro.length || why.contra.length) ? `<div class="h-cards reasons">
+          <div><h3>Das spricht dafür</h3>${why.pro.length ? `<ul class="plain">${reasonList(why.pro)}</ul>` : '<p class="muted">Kein Merkmal spricht derzeit deutlich für den Coin.</p>'}</div>
+          <div><h3>Das spricht dagegen</h3>${why.contra.length ? `<ul class="plain">${reasonList(why.contra)}</ul>` : '<p class="muted">Kein Merkmal spricht derzeit deutlich dagegen.</p>'}</div></div>
+          <p class="hint">Punkte = Beitrag des Merkmals zum Prognose-Score. Ein Kaufsignal entsteht nur, wenn die Gründe dafür klar überwiegen.</p>` : ''}
+      </section>`;
+
     let extra = '';
     if (d.ind) {
       // Rückblick-Test nur neu rechnen, wenn die Bitcoin-Daten für die Marktphase dazugekommen sind
@@ -746,7 +780,7 @@ function detailView(id) {
         <p class="hint">Wichtig: Die Bewertungskurven wurden an den letzten 4 Jahren großer Coins ausgerichtet. Die Trefferquoten im Rückblick fallen deshalb eher zu gut aus und sind keine Zusage für die Zukunft.</p>`;
     } else if (d.error) extra = `<section class="panel"><p class="muted">${esc(d.error)}</p></section>`;
 
-    $('#d-forecast').innerHTML = `
+    $('#d-forecast').innerHTML = `${percent}
       <h2>Prognose nach Zeithorizont</h2>
       <p class="hint">${d.ind ? `Verfeinert mit ${num(d.ind.n, 0)} Tageskursen.` : 'Schnellbewertung – die verfeinerte Prognose wird geladen …'}
         Die Punkte je Faktor reichen von −100 (klar negativ) bis +100 (klar positiv).</p>

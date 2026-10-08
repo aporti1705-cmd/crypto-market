@@ -54,8 +54,8 @@ export const EXPOSURE_CURVES = {
 };
 export const EXPOSURE_CURVE = EXPOSURE_CURVES.balanced;
 export const RESERVE_BACKTEST = {
-  balanced: { perYear: 64, drawdown: 49 },
-  cautious: { perYear: 53, drawdown: 39 },
+  balanced: { perYear: 69, drawdown: 45 },
+  cautious: { perYear: 61, drawdown: 37 },
 };
 
 // Was der Gesamtmarkt 30 Tage nach einer vergleichbaren Marktphase getan hat (alle 86 Coins, 2018–2026):

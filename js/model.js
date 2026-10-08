@@ -18,7 +18,11 @@ import { clamp, avg, isNum, num, signed } from './util.js';
 const W_SHORT = 0.2, W_MEDIUM = 0.25, W_LONG = 0.1, W_REGIME = 0.45;
 const BEAR_CAP = 0.11;          // im Bärenmarkt gibt es kein Kaufsignal
 const W_NEWS = 0.1;             // Nachrichten verschieben den Score um höchstens ±10 Punkte
-const BUY = 12, STRONG = 28;    // Schwellen des Gesamt-Scores (-100 … +100)
+// Schwellen des Gesamt-Scores (-100 … +100). Kaufsignal ab 15: Erst ab dort lag das mittlere Ergebnis
+// nach 7 und nach 30 Tagen im Plus – ein Kaufsignal soll sich mit einer positiven Prognose begründen lassen.
+const BUY = 15, STRONG = 28;
+// „Kaufen“ ohne Einschränkung erst ab 40: Erst dort lag das mittlere Ergebnis in beiden Prüfzeiträumen klar im Plus
+const STRONG_BUY = 40;
 const HORIZON_MIN = 0.1;
 
 const factor = (name, text, score, weight) => ({ name, text, score, weight });
@@ -73,6 +77,21 @@ const horizon = (factors) => {
   return { score: combine(valid), factors: valid };
 };
 
+// Schwankung des Coins. Auswertung 2018–2026: Ruhigere Coins schnitten in beiden Prüfzeiträumen besser ab als der Markt,
+// stark schwankende schlechter – das verlässlichste Merkmal der ganzen Untersuchung (7, 30 und 90 Tage).
+// Unter rund 1,5 % am Tag gab es in der Auswertung kaum Fälle – dort wird kein Vorteil unterstellt.
+const SWING = [[1, 0], [1.5, 0.5], [2, 0.6], [3, 0.4], [4, 0.1], [5, -0.1], [6.5, -0.3], [9, -0.5]];
+const SWING_W = { short: 0.3, medium: 0.5, long: 0.6 };
+function swingFactor(sw, weight, onlyPenalty = false) {
+  let score = curve(sw, SWING);
+  if (onlyPenalty && score > 0) score = 0;
+  if (score === null) return null;
+  const text = sw < 1.3 ? 'außergewöhnlich ruhig – dafür ist kein zusätzlicher Vorteil belegt'
+    : score > 0.3 ? 'ruhiger Coin, historisch im Vorteil' : score > 0.05 ? 'eher ruhig, leichter Vorteil'
+    : score < -0.15 ? 'stark schwankend, historisch im Nachteil' : 'durchschnittlich';
+  return factor('Schwankung', `${num(sw, 1)} % am Tag – ${text}`, score, weight);
+}
+
 const side = (x) => `${num(Math.abs(x))} % ${x >= 0 ? 'über' : 'unter'}`;
 const verdict = (s, good, bad, neutral = 'neutral') => (s > 0.15 ? good : s < -0.15 ? bad : neutral);
 
@@ -118,6 +137,19 @@ function stdev(a) {
 
 const logReturns = (p) => p.slice(1).map((x, i) => Math.log(x / p[i]));
 
+// Tagesschwankung in Prozent: Standardabweichung der Tagesrenditen über ein gleitendes Fenster
+function swingSeries(a, w) {
+  const out = new Array(a.length).fill(null);
+  let s = 0, q = 0;
+  const r = a.map((x, i) => (i ? Math.log(x / a[i - 1]) : 0));
+  for (let i = 1; i < a.length; i++) {
+    s += r[i]; q += r[i] * r[i];
+    if (i > w) { s -= r[i - w]; q -= r[i - w] * r[i - w]; }
+    if (i >= w) out[i] = Math.sqrt(Math.max(0, (q - s * s / w) / (w - 1))) * 100;
+  }
+  return out;
+}
+
 // Alle Tagesindikatoren einmal berechnen. Jeder Wert an Stelle i nutzt nur Daten bis i,
 // damit der Rückblick-Test nicht in die Zukunft schaut.
 export function prepare(times, prices, volumes) {
@@ -127,6 +159,7 @@ export function prepare(times, prices, volumes) {
     sma20: rolling(prices, 20), sma50: rolling(prices, 50), sma200: rolling(prices, 200),
     rsi: rsiSeries(prices),
     vol20: rolling(volumes, 20), vol90: rolling(volumes, 90),
+    swing: swingSeries(prices, 90),
   };
 }
 
@@ -160,6 +193,7 @@ export function scoreAt(ind, i) {
   }
 
   const long = [];
+  for (const [list, weight] of [[short, SWING_W.short], [medium, SWING_W.medium], [long, SWING_W.long]]) list.push(swingFactor(ind.swing[i], weight));
   add(long, 'Kurs zum 200-Tage-Schnitt', s200, (s) => `${side(s200)} dem 200-Tage-Schnitt – ${s200 > 40 ? 'überdehnt' : verdict(s, 'früher Aufwärtstrend', 'schwach')}`, C.sma200, 0.3);
   if (ind.sma50[i] && ind.sma200[i]) {
     const x = (ind.sma50[i] / ind.sma200[i] - 1) * 100;
@@ -173,7 +207,9 @@ export function scoreAt(ind, i) {
     add(long, 'Abstand zum Jahreshoch', dist, () => `${num(-dist, 0)} % unter dem Jahreshoch`, C.high, 0.15);
   }
 
-  return { short: horizon(short), medium: horizon(medium), long: horizon(long) };
+  // Ohne eigene Kursmerkmale gibt es keine Bewertung – die Schwankung allein trägt keinen Horizont
+  const own = (list) => horizon(list.some((f) => f && f.name !== 'Schwankung') ? list : []);
+  return { short: own(short), medium: own(medium), long: own(long) };
 }
 
 // ---------- Marktphase ----------
@@ -214,16 +250,20 @@ export function regimeSmooth(btc, j, fngAt = () => undefined, days = 7) {
 
 export const REGIME_DAYS = 14;
 
-// Was nach vergleichbaren Zyklus-Ständen in 12 Monaten geschah (2018–2026):
-// [Abstand zum Allzeithoch bis %, Bitcoin höher in % der Fälle, Bitcoin Median %, mittlerer Coin höher in %, mittlerer Coin Median %]
-const CYCLE_HISTORY = [[-70, 100, 95, 48, -7], [-55, 96, 109, 71, 26], [-40, 67, 97, 64, 24], [-25, 40, -30, 37, -58], [-10, 51, 11, 12, -43], [Infinity, 37, -17, 14, -61]];
+// Was nach vergleichbaren Zyklus-Ständen in 12 Monaten geschah. Die beiden Prüfzeiträume (2018–2022 und 2022–2026)
+// zählen je zur Hälfte, weil sie sich teils stark widersprechen – ein einzelner Zyklus soll das Bild nicht bestimmen.
+// [Abstand zum Allzeithoch bis %, Bitcoin höher in % der Fälle, Bitcoin Median %, mittlerer Coin höher in %, mittlerer Coin Median %,
+//  Bitcoin unteres/oberes Viertel %, mittlerer Coin unteres/oberes Viertel %]
+const CYCLE_HISTORY = [[-70, 100, 104, 54, -5, 65, 143, -26, 34], [-55, 93, 82, 70, 27, 45, 113, -14, 74], [-40, 78, 62, 72, 26, -10, 200, -24, 150],
+  [-25, 58, 41, 50, -24, -30, 125, -40, 20], [-10, 45, 17, 16, -46, -38, 47, -66, 10], [Infinity, 38, -18, 23, -42, -35, 40, -67, 0]];
 
 // Einordnung des Zyklus – die langfristige, antizyklische Sicht neben der kurzfristigen Marktphase
 export function cycleInfo(dd) {
   const row = CYCLE_HISTORY.find(([limit]) => dd < limit) ?? CYCLE_HISTORY[CYCLE_HISTORY.length - 1];
   const zone = dd <= -55 ? 'deep' : dd <= -40 ? 'low' : dd <= -10 ? 'mid' : 'high';
   const label = { deep: 'Tief im Zyklus – antizyklische Kaufzone', low: 'Unteres Drittel des Zyklus', mid: 'Mitte des Zyklus', high: 'Nahe am Allzeithoch – Gewinne sichern' }[zone];
-  return { dd, zone, label, btcUp: row[1], btcMedian: row[2], altUp: row[3], altMedian: row[4] };
+  return { dd, zone, label, btcUp: row[1], btcMedian: row[2], altUp: row[3], altMedian: row[4],
+    btcLow: row[5], btcHigh: row[6], altLow: row[7], altHigh: row[8] };
 }
 
 // Ersatz, falls keine Bitcoin-Tageskurse geladen werden konnten
@@ -231,6 +271,80 @@ function regimeFromMarket(btc) {
   const d30 = btc?.price_change_percentage_30d_in_currency;
   const score = curve(d30, C.btcRet30);
   return horizon(score === null ? [] : [factor('Bitcoin Momentum 30 Tage', `${signed(d30)} %`, score, 1)]);
+}
+
+// ---------- Prozent-Prognose ----------
+// Was folgte in der Vergangenheit auf welchen Score? Ausgewertet an 174 000 Coin-Tagen (84 Coins, 2018–2026),
+// gemessen in Einheiten der üblichen Schwankung des Coins, damit ruhige und nervöse Coins vergleichbar sind.
+// [Score, mittleres Ergebnis]; die Spanne reicht vom unteren bis zum oberen Viertel der Fälle. Die beiden
+// Prüfzeiträume (2018–2022, 2022–2026) zählen je zur Hälfte. UP: Anteil der Fälle mit höherem Kurs in %.
+const Z7 = [[-35, -0.16], [-20, -0.09], [-6, -0.06], [6, -0.06], [16, 0.01], [24, 0.07], [34, 0.15], [46, 0.34]];
+const Z30 = [[-35, -0.25], [-20, -0.22], [-6, -0.1], [6, -0.1], [16, 0.03], [34, 0.06], [46, 0.2]];
+const UP7 = [[-35, 39], [-20, 45], [-6, 47], [6, 47], [16, 50], [24, 53], [34, 56], [46, 62]];
+const UP30 = [[-35, 32], [-20, 37], [-6, 45], [6, 45], [16, 50], [34, 50], [46, 58]];
+const Z7_RANGE = [-0.5, 0.6], Z30_RANGE = [-0.55, 0.7];
+// Auf 12 Monate zählt vor allem der Stand im Zyklus; der langfristige Baustein des Coins verschiebt das Ergebnis
+const LONG_ADJ = [[0, -0.1], [10, 0], [30, 0.2], [45, 0.35]];
+// Gesamtmarkt nach Marktphase: [Marktphase, mittleres Ergebnis in %]
+const M = {
+  alt7: [[-30, -1], [30, -1], [40, 0], [55, 3]], btc7: [[-30, 0], [40, 0.5], [55, 2]],
+  alt30: [[-40, -7], [-20, -3], [40, -2], [55, 6]], btc30: [[-40, 1], [0, 0], [20, 2], [40, 4], [55, 5]],
+  altUp7: [[-30, 44], [30, 45], [40, 49], [55, 60]], btcUp7: [[-30, 52], [30, 52], [40, 55], [55, 61]],
+  altUp30: [[-40, 30], [-20, 42], [40, 45], [55, 54]], btcUp30: [[-40, 55], [0, 50], [20, 53], [40, 58], [55, 61]],
+};
+
+const r1 = (x) => Math.round(x * 10) / 10;
+const span = (days, mid, low, high, up) => ({ days, mid: r1(mid), low: r1(low), high: r1(high), up: isNum(up) ? Math.round(up) : null });
+const fromLog = (x) => (Math.exp(x) - 1) * 100;
+const toLog = (p) => Math.log(1 + Math.max(p, -95) / 100);
+
+function longSpan(cycle, btc, longScore) {
+  if (!cycle) return null;
+  const [mid, low, high] = btc ? [cycle.btcMedian, cycle.btcLow, cycle.btcHigh] : [cycle.altMedian, cycle.altLow, cycle.altHigh];
+  const adj = btc || !isNum(longScore) ? 0 : curve(longScore * 100, LONG_ADJ);
+  // Auf Jahressicht widersprechen sich die beiden Zyklen zu stark für eine belastbare Trefferquote
+  return span(365, fromLog(toLog(mid) + adj), fromLog(toLog(low) + adj), fromLog(toLog(high) + adj));
+}
+
+// Erwartete Kursveränderung eines Coins: mittleres Ergebnis und übliche Spanne je Zeitraum
+function forecastOf(score, volDaily, longScore, regime, btc) {
+  const sd = clamp(isNum(volDaily) ? volDaily / 100 : 0.05, 0.015, 0.12);
+  const one = (days, pts, [lo, hi], up) => {
+    const z = curve(score, pts), unit = sd * Math.sqrt(days);
+    return span(days, fromLog(z * unit), fromLog((z + lo) * unit), fromLog((z + hi) * unit), curve(score, up));
+  };
+  const cycle = isNum(regime?.cycle?.dd) ? cycleInfo(regime.cycle.dd) : null;
+  // Bitcoin bestimmt die Marktphase selbst – dafür gilt die Auswertung der Bitcoin-Geschichte aus der Marktprognose
+  if (btc && regime?.score != null) return marketForecast(regime, cycle).btc;
+  return { short: one(7, Z7, Z7_RANGE, UP7), medium: one(30, Z30, Z30_RANGE, UP30), long: longSpan(cycle, btc, longScore) };
+}
+
+// Erwartete Veränderung des Gesamtmarkts: Bitcoin und ein mittlerer Coin
+function marketForecast(regime, cycle) {
+  if (regime.score === null) return null;
+  const x = regime.score * 100;
+  return {
+    btc: { short: span(7, curve(x, M.btc7), curve(x, M.btc7) - 4, curve(x, M.btc7) + 5, curve(x, M.btcUp7)),
+      medium: span(30, curve(x, M.btc30), curve(x, M.btc30) - 10, curve(x, M.btc30) + 13, curve(x, M.btcUp30)), long: longSpan(cycle, true) },
+    alt: { short: span(7, curve(x, M.alt7), curve(x, M.alt7) - 6, curve(x, M.alt7) + 6, curve(x, M.altUp7)),
+      medium: span(30, curve(x, M.alt30), curve(x, M.alt30) - 14, curve(x, M.alt30) + 17, curve(x, M.altUp30)), long: longSpan(cycle, false, null) },
+  };
+}
+
+// Die stärksten Gründe für und gegen den Coin, gewichtet wie im Gesamt-Score
+function reasons(short, medium, long, regime) {
+  const all = [];
+  for (const [h, w, label] of [[short, W_SHORT, 'kurzfristig'], [medium, W_MEDIUM, 'mittelfristig'], [long, W_LONG, 'langfristig'], [regime, W_REGIME, 'Marktphase']]) {
+    const sum = h.factors.reduce((s, f) => s + f.weight, 0);
+    for (const f of h.factors) {
+      const points = f.score * f.weight / sum * w * 100;
+      const same = all.find((x) => x.name === f.name);
+      if (same) { same.points += points; same.horizon = 'alle Zeiträume'; } else all.push({ name: f.name, text: f.text, horizon: label, points });
+    }
+  }
+  for (const f of all) f.points = Math.round(f.points);
+  const top = (dir) => all.filter((f) => f.points * dir >= 2).sort((a, b) => (b.points - a.points) * dir).slice(0, 3);
+  return { pro: top(1), contra: top(-1) };
 }
 
 // ---------- Schnellbewertung aus den Marktdaten (Liste mit 1000 Coins) ----------
@@ -256,10 +370,16 @@ export function isStable(c) {
   return (Math.max(...p) - Math.min(...p)) / p[p.length - 1] < 0.02 && (!isNum(d30) || Math.abs(d30) < 3);
 }
 
+// Token, die den Kurs von Aktien, Fonds, Edelmetallen oder Währungen abbilden. Marktphase und Zyklus des
+// Kryptomarkts gelten für sie nicht, und das Modell wurde nur an Krypto-Coins geprüft.
+const FOREIGN_NAME = /xstock|bstock|tokenized|\betf\b|robinhood token|t-bills?|treasury|money market|\bfund\b.*\b(eur|usd|euro)\b|\b(gold|silver|precious metals)\b|\beuro?\b|eurø/i;
+const FOREIGN_NOT = /adventure gold|gold park|yield guild/i;
+export const isForeign = (c) => (FOREIGN_NAME.test(c.name ?? '') && !FOREIGN_NOT.test(c.name ?? '')) || /^eur/i.test(c.symbol ?? '');
+
 function none(label, text, stable = false) {
   const empty = horizon([]);
   return { signal: 'none', label, score: null, stable, short: empty, medium: empty, long: empty, regime: empty,
-    news: null, horizon: '–', risk: { level: 0, label: '–', vol: null }, agreement: null, notes: [text] };
+    news: null, horizon: '–', risk: { level: 0, label: '–', vol: null }, agreement: null, notes: [text], forecast: null, reasons: null };
 }
 
 function riskOf(c, volDaily) {
@@ -282,7 +402,7 @@ export function totalScore(short, medium, long, regime) {
   return regime?.bear ? Math.min(raw, BEAR_CAP) : raw;
 }
 
-export const signalOf = (score) => (score >= STRONG ? ['buy', 'Kaufen'] : score >= BUY ? ['buy', 'Eher kaufen']
+export const signalOf = (score) => (score >= STRONG_BUY ? ['buy', 'Kaufen'] : score >= BUY ? ['buy', 'Eher kaufen']
   : score <= -STRONG ? ['sell', 'Verkaufen'] : score <= -BUY ? ['sell', 'Eher verkaufen'] : ['hold', 'Halten']);
 
 function assemble(c, short, medium, long, regime, volDaily, news) {
@@ -317,7 +437,8 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   const dir = Math.sign(score);
   const agreeing = own.filter((h) => Math.abs(h.score) > HORIZON_MIN && Math.sign(h.score) === dir).length;
   return { signal, label, score, stable: false, short, medium, long, regime, news: news ?? null, horizon: hold,
-    risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes };
+    risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes,
+    forecast: forecastOf(score, volDaily, long.score, regime, c.id === 'bitcoin'), reasons: reasons(short, medium, long, regime) };
 }
 
 // Starker Tagesrückgang. Auswertung 2018–2026: Fiel ein Coin an einem Tag um mehr als 20 %, stand er 3 Tage
@@ -346,6 +467,7 @@ const withDip = (short, c, regime) => {
 
 export function quickAnalyse(c, regime) {
   if (isStable(c)) return none('Stablecoin', 'Der Kurs ist an einen festen Wert gebunden – keine Prognose nötig.', true);
+  if (isForeign(c)) return none('Kein Krypto-Coin', 'Dieser Token bildet den Kurs einer Aktie, eines Fonds, eines Edelmetalls oder einer Währung ab. Das Modell ist an Krypto-Coins geprüft und gibt dafür keine Prognose.');
   const prices = sparkline(c);
   const ch = changes(c);
   const f = (name, value, pts, weight, text) => {
@@ -371,13 +493,16 @@ export function quickAnalyse(c, regime) {
   ];
 
   const volDaily = prices.length >= 60 ? stdev(logReturns(prices)) * Math.sqrt(24) * 100 : null;
-  return assemble(c, withDip(horizon(short), c, regime), horizon(medium), horizon(long), regime, volDaily);
+  // Hier stammt die Schwankung nur aus 7 Tagen Stundenkursen: Ruhe über so kurze Zeit ist kein Beleg, deshalb
+  // zählt sie in der Schnellbewertung nur als Nachteil. Mit Tageskursen (90 Tage) zählt sie in beide Richtungen.
+  const withSwing = (list, weight) => horizon(list.some(Boolean) ? [...list, swingFactor(volDaily, weight, true)] : []);
+  return assemble(c, withDip(withSwing(short, SWING_W.short), c, regime), withSwing(medium, SWING_W.medium), withSwing(long, SWING_W.long), regime, volDaily);
 }
 
 // Verfeinerte Bewertung mit Tageskursen (bis zu 4 Jahre) und Nachrichten
 export function detailAnalyse(c, ind, regime, news) {
   const quick = c.analysis;
-  if (quick.stable || ind.n < 30) return quick;
+  if (quick.signal === 'none' || ind.n < 30) return quick;
   const s = scoreAt(ind, ind.n - 1);
   const pick = (a, b) => (a.score !== null ? a : b);
   // quick.short enthält den Tagesrückgang schon; der Baustein aus Tageskursen bekommt ihn hier dazu
@@ -424,7 +549,7 @@ export function marketIndex(coins, btcInd, fng, news) {
   else if (value <= 32) [signal, label] = ['sell', 'Verkaufen'];
   else if (value <= 43) [signal, label] = ['sell', 'Eher verkaufen'];
   else [signal, label] = ['hold', 'Halten'];
-  return { value, signal, label, parts, regime, cycle };
+  return { value, signal, label, parts, regime, cycle, forecast: marketForecast(regime, cycle) };
 }
 
 // ---------- Nachrichten ----------

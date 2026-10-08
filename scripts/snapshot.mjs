@@ -52,7 +52,8 @@ async function history(symbol) {
     end = part[0][0] - 1;
     if (part.length < 1000) break;
   }
-  if (rows.length < 60) return null;
+  // Wird das Paar nicht mehr gehandelt, liefert Binance alte Kerzen – die taugen nicht für eine aktuelle Bewertung
+  if (rows.length < 60 || Date.now() - rows[rows.length - 1][0] > 3 * 86_400_000) return null;
   const cut = rows.slice(-DAYS_4Y);
   return { t: cut.map((r) => r[0]), p: cut.map((r) => Number(r[4])), v: cut.map((r) => Number(r[7])) };
 }
@@ -92,7 +93,7 @@ async function worker() {
   for (let c = queue.shift(); c; c = queue.shift()) {
     c.analysis = quickAnalyse(c, regime);
     const p = prices?.get(c.symbol.toUpperCase() + 'USDT');
-    if (c.analysis.stable || !p || !(Math.abs(p / c.current_price - 1) < 0.1)) continue;
+    if (c.analysis.signal === 'none' || !p || !(Math.abs(p / c.current_price - 1) < 0.1)) continue;
     const daily = c.id === 'bitcoin' ? btcData : await optional(c.symbol, () => history(c.symbol.toUpperCase()));
     if (!daily) continue;
     c.analysis = detailAnalyse(c, prepare(daily.t, [...daily.p.slice(0, -1), c.current_price], daily.v), regime);
@@ -105,7 +106,7 @@ console.log(`${refined} Coins mit Tageskursen verfeinert`);
 const snapshot = {
   version: 1,
   time: Date.now(),
-  market: { value: market.value, signal: market.signal, label: market.label, parts: market.parts, regime, cycle: market.cycle },
+  market: { value: market.value, signal: market.signal, label: market.label, parts: market.parts, regime, cycle: market.cycle, forecast: market.forecast },
   fng: fng ? { value: fng.value, week: fng.week, month: fng.month } : null,
   coins: coins.map((c) => {
     const out = {};

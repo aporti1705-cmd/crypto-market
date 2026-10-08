@@ -413,3 +413,12 @@ textarea { background: var(--panel); color: var(--text); border: 1px solid var(-
   .gauge-value { font-size: 28px; }
 }
 @media (max-width: 340px) { .hero { grid-template-columns: 1fr; } }
+
+/* Prozent-Prognosen */
+#market-forecast { margin-top: 18px; }
+.fc-table { width: 100%; margin-top: 8px; }
+.fc-table td, .fc-table th { padding: 10px 8px; }
+.fc-table td strong { font-size: 17px; font-variant-numeric: tabular-nums; }
+.fc-range { font-size: 12px; white-space: nowrap; }
+.reasons { margin-top: 18px; }
+.reasons h3 { margin: 0 0 4px; font-size: 15px; }

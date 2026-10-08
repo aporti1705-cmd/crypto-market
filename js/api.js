@@ -72,7 +72,9 @@ export async function history(symbol) {
     end = part[0][0] - 1;
     if (part.length < 1000) break;
   }
-  const data = rows && rows.length >= 60 ? (() => {
+  // Wird das Paar nicht mehr gehandelt, liefert Binance alte Kerzen – die taugen nicht für eine aktuelle Bewertung
+  const fresh = rows && rows.length >= 60 && Date.now() - rows[rows.length - 1][0] < 3 * 86_400_000;
+  const data = fresh ? (() => {
     const cut = rows.slice(-DAYS_4Y);
     // Spalten: 0 = Tagesbeginn, 4 = Schlusskurs, 7 = Handelsvolumen in USDT
     return { t: cut.map((r) => r[0]), p: cut.map((r) => Number(r[4])), v: cut.map((r) => Number(r[7])) };
