@@ -469,7 +469,8 @@ function marketView() {
           <tbody>${row('Bitcoin', 'Leitwährung', fc.btc)}${row('Mittlerer Coin', 'typischer Altcoin', fc.alt)}</tbody></table></div>
         <p class="hint">Fett: das mittlere Ergebnis nach vergleichbaren Marktlagen seit 2018. Darunter die Spanne, in der die Hälfte der Fälle lag –
           jeder vierte Fall lag darüber, jeder vierte darunter. 7 und 30 Tage hängen an der Marktphase, 12 Monate am Stand im Zyklus.
-          Der mittlere Coin schnitt auf Jahressicht meist schlechter ab als Bitcoin.</p>`;
+          Der mittlere Coin schnitt auf Jahressicht meist schlechter ab als Bitcoin.
+          Kaufsignale bei einzelnen Coins beziehen sich auf die nächsten Wochen; ist die 12-Monats-Sicht negativ, steht das beim Coin dabei.</p>`;
     }
     const f = state.fng;
     $('#g-fng').innerHTML = f ? `<div class="label">Fear &amp; Greed Index</div>${gauge(f.value, SELL_TO_BUY)}
@@ -710,6 +711,7 @@ function detailView(id) {
       <div class="d-signal">${badge(a, 'big')}
         <dl><div><dt>Prognose-Score</dt><dd class="${tone(a.score)}">${a.score === null ? '–' : signed(a.score, 0) + ' / 100'}</dd></div>
           <div><dt>Haltedauer</dt><dd>${a.horizon}</dd></div>
+          ${a.scope ? `<div><dt>Signal gilt für</dt><dd>${a.scope === 'weeks' ? 'die nächsten Wochen – nicht zum langen Halten' : 'Wochen bis Monate'}</dd></div>` : ''}
           <div><dt>Risiko</dt><dd>${riskTag(a.risk)}</dd></div>
           <div><dt>Übereinstimmung</dt><dd>${a.agreement ? `${a.agreement.agreeing} von ${a.agreement.of} Zeithorizonten` : '–'}</dd></div></dl></div>
     </section>`;

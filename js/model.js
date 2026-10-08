@@ -436,9 +436,18 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   const own = [short, medium, long].filter((h) => h.score !== null);
   const dir = Math.sign(score);
   const agreeing = own.filter((h) => Math.abs(h.score) > HORIZON_MIN && Math.sign(h.score) === dir).length;
+  // Das Signal bewertet die nächsten Wochen. Zeigt die Jahressicht nach unten, ist ein Kaufsignal nur ein
+  // Handel auf Zeit – das muss dastehen, sonst widersprechen sich Signal und 12-Monats-Prognose.
+  const forecast = forecastOf(score, volDaily, long.score, regime, c.id === 'bitcoin');
+  const yearDown = forecast.long && forecast.long.mid <= -5;
+  if (signal === 'buy' && yearDown) {
+    if (hold === '1–3 Monate') hold = '2–4 Wochen';
+    notes.unshift(`Das Kaufsignal gilt für die nächsten Wochen, nicht zum langen Halten: Auf 12 Monate lag das mittlere Ergebnis vergleichbarer Coins bei ${signed(forecast.long.mid, 0)} %. Wer kauft, sollte nach der Haltedauer neu prüfen und bei einem Verkaufssignal aussteigen.`);
+  }
   return { signal, label, score, stable: false, short, medium, long, regime, news: news ?? null, horizon: hold,
+    scope: signal === 'buy' ? (yearDown ? 'weeks' : 'open') : null,
     risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes,
-    forecast: forecastOf(score, volDaily, long.score, regime, c.id === 'bitcoin'), reasons: reasons(short, medium, long, regime) };
+    forecast, reasons: reasons(short, medium, long, regime) };
 }
 
 // Starker Tagesrückgang. Auswertung 2018–2026: Fiel ein Coin an einem Tag um mehr als 20 %, stand er 3 Tage
