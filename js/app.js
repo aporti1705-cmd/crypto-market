@@ -3,7 +3,7 @@ import * as api from './api.js';
 import * as pf from './portfolio.js';
 import * as auth from './auth.js';
 import { plan, applyMove, adjusted, reserveAdvice, EXPOSURE_CURVES, RESERVE_BACKTEST } from './manager.js';
-import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews, TRADE_SETUPS, TRADE_LIMITS } from './model.js';
+import { quickAnalyse, detailAnalyse, marketIndex, prepare, backtest, expectedMove, outlook, analyseNews, TRADE_SETUPS, TRADE_LIMITS, outlookOf } from './model.js';
 
 const REFRESH_MS = 120_000;      // so alt dürfen gespeicherte Kurse sein, bevor sofort neu geladen wird
 const PAGE_INTERVAL_MS = 30_000;
@@ -713,7 +713,7 @@ function detailView(id) {
           <div><dt>Haltedauer</dt><dd>${a.horizon}</dd></div>
           ${a.scope ? `<div><dt>Signal gilt für</dt><dd>${a.scope === 'weeks' ? 'die nächsten Wochen – nicht zum langen Halten' : 'Wochen bis Monate'}</dd></div>` : ''}
           <div><dt>Risiko</dt><dd>${riskTag(a.risk)}</dd></div>
-          <div><dt>Übereinstimmung</dt><dd>${a.agreement ? `${a.agreement.agreeing} von ${a.agreement.of} Zeithorizonten` : '–'}</dd></div></dl></div>
+          <div><dt>Übereinstimmung</dt><dd>${a.agreement ? `${a.agreement.agreeing} von ${a.agreement.of} Prognosen` : '–'}</dd></div></dl></div>
     </section>`;
   }
 
@@ -735,10 +735,14 @@ function detailView(id) {
 
   function forecast(c, a) {
     if (a.signal === 'none') { $('#d-forecast').innerHTML = `<section class="panel"><h2>Prognose</h2><p>${esc(a.notes[0])}</p></section>`; return; }
-    const card = (title, span, h) => `<div class="panel h-card">
+    // Die Einordnung je Zeitraum kommt aus der Prozent-Prognose – so können sich Wort und Zahl nicht widersprechen
+    const card = (title, span, h, f) => {
+      const [word, dir] = f === undefined ? [outlook(h.score), h.score === null || Math.abs(h.score) <= 0.12 ? 0 : h.score] : outlookOf(f);
+      return `<div class="panel h-card">
       <div class="panel-top"><div><h3>${title}</h3><div class="muted">${span}</div></div>
-        <span class="outlook ${tone(h.score === null || Math.abs(h.score) <= 0.12 ? 0 : h.score)}">${outlook(h.score)}</span></div>
+        <span class="outlook ${tone(dir)}">${word}${f ? ` · ${signed(f.mid, Math.abs(f.mid) < 10 ? 1 : 0)} %` : ''}</span></div>
       ${factorList(h.factors)}</div>`;
+    };
 
     const fcast = a.forecast;
     const fbox = (title, s) => (s ? `<div><div class="label">${title}</div>
@@ -785,10 +789,11 @@ function detailView(id) {
     $('#d-forecast').innerHTML = `${percent}
       <h2>Prognose nach Zeithorizont</h2>
       <p class="hint">${d.ind ? `Verfeinert mit ${num(d.ind.n, 0)} Tageskursen.` : 'Schnellbewertung – die verfeinerte Prognose wird geladen …'}
-        Die Punkte je Faktor reichen von −100 (klar negativ) bis +100 (klar positiv).</p>
+        Die Punkte je Faktor reichen von −100 (klar negativ) bis +100 (klar positiv). Die Einordnung oben rechts in jeder Karte ist die Prozent-Prognose für diesen Zeitraum;
+        in sie fließen neben den Merkmalen der Karte auch der Gesamt-Score und die Marktphase ein.</p>
       ${a.notes.map((n) => `<p class="notice">${esc(n)}</p>`).join('')}
-      <div class="h-cards">${card('Kurzfristig', 'bis 1 Woche', a.short)}${card('Mittelfristig', '2–4 Wochen', a.medium)}
-        ${card('Langfristig', '1–3 Monate', a.long)}${card('Marktphase', 'gilt für alle Coins · Schnitt aus 14 Tagen, Einzelwerte von heute', a.regime)}</div>
+      <div class="h-cards">${card('Kurzfristig', 'Prognose für 7 Tage', a.short, a.forecast?.short ?? null)}${card('Mittelfristig', 'Prognose für 30 Tage', a.medium, a.forecast?.medium ?? null)}
+        ${card('Langfristig', 'Prognose für 12 Monate – vor allem vom Zyklus bestimmt, die Trendmerkmale unten verschieben sie', a.long, a.forecast?.long ?? null)}${card('Marktphase', 'gilt für alle Coins · Schnitt aus 14 Tagen, Einzelwerte von heute', a.regime)}</div>
       ${extra}`;
   }
 

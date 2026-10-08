@@ -283,6 +283,10 @@ const Z30 = [[-35, -0.25], [-20, -0.22], [-6, -0.1], [6, -0.1], [16, 0.03], [34,
 const UP7 = [[-35, 39], [-20, 45], [-6, 47], [6, 47], [16, 50], [24, 53], [34, 56], [46, 62]];
 const UP30 = [[-35, 32], [-20, 37], [-6, 45], [6, 45], [16, 50], [34, 50], [46, 58]];
 const Z7_RANGE = [-0.5, 0.6], Z30_RANGE = [-0.55, 0.7];
+// Auf 7 Tage zählt zusätzlich der kurzfristige Baustein: Lag er hoch (Ausverkauf, überverkaufter RSI), folgte in beiden
+// Prüfzeiträumen eine Erholung – auch bei schwachem Gesamt-Score. Gilt ab Baustein +20; darunter entscheidet der Score.
+const Z7_SHORT = [[20, 0.05], [30, 0.07], [50, 0.21], [65, 0.26]];
+const UP7_SHORT = [[20, 51], [30, 53], [50, 63], [65, 67]];
 // Auf 12 Monate zählt vor allem der Stand im Zyklus; der langfristige Baustein des Coins verschiebt das Ergebnis
 const LONG_ADJ = [[0, -0.1], [10, 0], [30, 0.2], [45, 0.35]];
 // Gesamtmarkt nach Marktphase: [Marktphase, mittleres Ergebnis in %]
@@ -307,11 +311,14 @@ function longSpan(cycle, btc, longScore) {
 }
 
 // Erwartete Kursveränderung eines Coins: mittleres Ergebnis und übliche Spanne je Zeitraum
-function forecastOf(score, volDaily, longScore, regime, btc) {
+function forecastOf(score, volDaily, shortScore, longScore, regime, btc) {
   const sd = clamp(isNum(volDaily) ? volDaily / 100 : 0.05, 0.015, 0.12);
-  const one = (days, pts, [lo, hi], up) => {
-    const z = curve(score, pts), unit = sd * Math.sqrt(days);
-    return span(days, fromLog(z * unit), fromLog((z + lo) * unit), fromLog((z + hi) * unit), curve(score, up));
+  const rebound = isNum(shortScore) && shortScore * 100 >= 20;
+  const one = (days, pts, [lo, hi], upPts) => {
+    let z = curve(score, pts), up = curve(score, upPts);
+    if (days === 7 && rebound) { z = Math.max(z, curve(shortScore * 100, Z7_SHORT)); up = Math.max(up, curve(shortScore * 100, UP7_SHORT)); }
+    const unit = sd * Math.sqrt(days);
+    return span(days, fromLog(z * unit), fromLog((z + lo) * unit), fromLog((z + hi) * unit), up);
   };
   const cycle = isNum(regime?.cycle?.dd) ? cycleInfo(regime.cycle.dd) : null;
   // Bitcoin bestimmt die Marktphase selbst – dafür gilt die Auswertung der Bitcoin-Geschichte aus der Marktprognose
@@ -405,6 +412,21 @@ export function totalScore(short, medium, long, regime) {
 export const signalOf = (score) => (score >= STRONG_BUY ? ['buy', 'Kaufen'] : score >= BUY ? ['buy', 'Eher kaufen']
   : score <= -STRONG ? ['sell', 'Verkaufen'] : score <= -BUY ? ['sell', 'Eher verkaufen'] : ['hold', 'Halten']);
 
+// Wie viele der drei Prozent-Prognosen zeigen in die Richtung des Signals?
+function agreementOf(forecast, dir) {
+  const all = [forecast.short, forecast.medium, forecast.long].filter(Boolean);
+  return { agreeing: all.filter((s) => dir !== 0 && Math.sign(s.mid) === dir).length, of: all.length };
+}
+
+// Einordnung einer Prozent-Prognose in Worte – dieselbe Zahl, die auch als Prozentwert dasteht
+export function outlookOf(s) {
+  if (!s) return ['Keine Daten', 0];
+  if (s.days >= 365) return s.mid >= 50 ? ['Sehr positiv', 1] : s.mid >= 10 ? ['Positiv', 1] : s.mid <= -40 ? ['Sehr negativ', -1] : s.mid <= -10 ? ['Negativ', -1] : ['Neutral', 0];
+  const up = s.up ?? 50;
+  return s.mid > 0 && up >= 60 ? ['Sehr positiv', 1] : s.mid > 0 && up >= 53 ? ['Positiv', 1]
+    : s.mid < 0 && up <= 40 ? ['Sehr negativ', -1] : s.mid < 0 && up <= 47 ? ['Negativ', -1] : ['Neutral', 0];
+}
+
 function assemble(c, short, medium, long, regime, volDaily, news) {
   let raw = totalScore(short, medium, long, regime);
   if (raw === null) return none('Keine Daten', 'Zu wenig Kursdaten für eine Prognose.');
@@ -433,12 +455,14 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   if (signal === 'buy') hold = pos(long) && !neg(medium) ? '1–3 Monate' : pos(medium) ? '2–4 Wochen' : pos(short) ? 'bis 1 Woche' : '2–4 Wochen';
   else if (signal === 'hold') hold = 'Abwarten';
 
-  const own = [short, medium, long].filter((h) => h.score !== null);
-  const dir = Math.sign(score);
-  const agreeing = own.filter((h) => Math.abs(h.score) > HORIZON_MIN && Math.sign(h.score) === dir).length;
   // Das Signal bewertet die nächsten Wochen. Zeigt die Jahressicht nach unten, ist ein Kaufsignal nur ein
   // Handel auf Zeit – das muss dastehen, sonst widersprechen sich Signal und 12-Monats-Prognose.
-  const forecast = forecastOf(score, volDaily, long.score, regime, c.id === 'bitcoin');
+  const forecast = forecastOf(score, volDaily, short.score, long.score, regime, c.id === 'bitcoin');
+  // Ein Kaufsignal muss sich mit den Prozent-Prognosen decken: 7 und 30 Tage im Plus, sonst nur „Halten“
+  if (signal === 'buy' && (forecast.short.mid <= 0 || forecast.medium.mid <= 0)) {
+    [signal, label, hold] = ['hold', 'Halten', 'Abwarten'];
+    notes.push('Der Score reicht für ein Kaufsignal, aber die Prognose für 7 oder 30 Tage liegt nicht im Plus – deshalb nur „Halten“.');
+  }
   const yearDown = forecast.long && forecast.long.mid <= -5;
   if (signal === 'buy' && yearDown) {
     if (hold === '1–3 Monate') hold = '2–4 Wochen';
@@ -446,7 +470,7 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   }
   return { signal, label, score, stable: false, short, medium, long, regime, news: news ?? null, horizon: hold,
     scope: signal === 'buy' ? (yearDown ? 'weeks' : 'open') : null,
-    risk: riskOf(c, volDaily), agreement: { agreeing, of: own.length }, notes,
+    risk: riskOf(c, volDaily), agreement: agreementOf(forecast, signal === 'sell' ? -1 : signal === 'buy' ? 1 : Math.sign(score)), notes,
     forecast, reasons: reasons(short, medium, long, regime) };
 }
 
