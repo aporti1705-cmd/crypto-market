@@ -239,7 +239,7 @@ summary:hover { color: var(--text); }
 .empty-state .btn-row .btn { flex: 0 1 auto; }
 .foot-actions { text-align: right; margin-top: 10px; }
 
-.reserve-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0 12px; }
+.reserve-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 10px; margin: 6px 0 12px; }
 .reserve-option { display: grid; gap: 2px; text-align: left; background: var(--panel-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: 12px; padding: 10px 12px; font: inherit; cursor: pointer; }
 .reserve-option strong { font-size: 22px; font-variant-numeric: tabular-nums; }
 .reserve-option .muted { font-size: 12px; line-height: 1.35; }
@@ -433,3 +433,14 @@ textarea { background: var(--panel); color: var(--text); border: 1px solid var(-
 .trade-grid dd.muted { font-size: 12px; font-weight: 500; }
 .trade-status { margin: 14px 0 0; font-weight: 700; }
 #t-watch .coin-cell { text-decoration: none; color: inherit; }
+
+/* Fear & Greed im Modell, Einsatz-Rechner, Hebel */
+.fng-effect { display: grid; gap: 2px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; text-align: left; }
+.sizing { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 8px; }
+.sizing label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); flex: 1 1 200px; }
+.sizing input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px 12px; font: inherit; }
+.trade-lev { margin: 12px 0 0; display: grid; gap: 2px; }
+.trade-lev .muted, .trade-size { font-size: 13px; }
+.trade-size { margin: 8px 0 0; }
+#t-rules h3 { margin: 20px 0 4px; font-size: 16px; }
+#t-short table td:first-child { white-space: normal; min-width: 180px; }

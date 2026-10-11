@@ -66,9 +66,23 @@ const started = Date.now();
 const coins = await markets();
 console.log(`${coins.length} Coins geladen`);
 
-const fngData = await optional('Fear & Greed', async () => (await getJson('https://api.alternative.me/fng/?limit=31', { tries: 2, wait: 5000 })).data);
+// 150 Tage Verlauf: Das Modell braucht, wie lange der Index schon in einer Zone steht (bis zu 60 Tage zurück)
+const fngData = await optional('Fear & Greed', async () => (await getJson('https://api.alternative.me/fng/?limit=150', { tries: 2, wait: 5000 })).data);
 const fng = fngData ? { value: Number(fngData[0].value), week: Number(fngData[7]?.value), month: Number(fngData[29]?.value),
+  values: fngData.map((d) => Number(d.value)),
   byDay: new Map(fngData.map((d) => [Math.floor(Number(d.timestamp) / 86400), Number(d.value)])) } : null;
+
+// Fear & Greed Index von CoinMarketCap, nur zur Anzeige und nur mit eigenem API-Schlüssel (Umgebungsvariable CMC_API_KEY).
+// Gerechnet wird mit dem Index von alternative.me: Er liegt seit 2018 vor und ist damit prüfbar, der von CoinMarketCap
+// erst seit Mitte 2023. Beide laufen zu rund 90 % gleich, lösen die Regeln aber an teils anderen Tagen aus.
+const cmc = process.env.CMC_API_KEY ? await optional('Fear & Greed von CoinMarketCap', async () => {
+  const res = await fetch('https://pro-api.coinmarketcap.com/v3/fear-and-greed/latest',
+    { headers: { 'X-CMC_PRO_API_KEY': process.env.CMC_API_KEY, accept: 'application/json' } });
+  if (!res.ok) throw new Error(`Antwort ${res.status}`);
+  const d = (await res.json()).data;
+  if (!Number.isFinite(Number(d?.value))) throw new Error('unerwartete Antwort');
+  return { value: Math.round(Number(d.value)), label: String(d.value_classification ?? '') };
+}) : null;
 
 const news = await optional('Nachrichten', async () => {
   const json = await getJson('https://cryptocurrency.cv/api/search?q=crypto&limit=30', { tries: 1 });
@@ -107,7 +121,7 @@ const snapshot = {
   version: 1,
   time: Date.now(),
   market: { value: market.value, signal: market.signal, label: market.label, parts: market.parts, regime, cycle: market.cycle, forecast: market.forecast },
-  fng: fng ? { value: fng.value, week: fng.week, month: fng.month } : null,
+  fng: fng ? { value: fng.value, week: fng.week, month: fng.month, cmc } : null,
   coins: coins.map((c) => {
     const out = {};
     for (const f of FIELDS) out[f] = c[f];

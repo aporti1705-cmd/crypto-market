@@ -19,7 +19,7 @@ export function normalise(data) {
     // Gewünschte Reserve in Prozent; null bedeutet: dem Vorschlag der Seite folgen
     reservePct: Number.isFinite(pct) && pct >= 0 && pct <= 100 ? pct : null,
     // Welchem Vorschlag gefolgt wird, solange kein eigener Wert gesetzt ist
-    reserveMode: data?.reserveMode === 'cautious' ? 'cautious' : 'balanced' };
+    reserveMode: ['cautious', 'contrarian'].includes(data?.reserveMode) ? data.reserveMode : 'balanced' };
 }
 
 export function load() {

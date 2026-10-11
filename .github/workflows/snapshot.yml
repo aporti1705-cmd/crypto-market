@@ -25,6 +25,9 @@ jobs:
           node-version: 22
       - name: Berechnen
         run: node scripts/snapshot.mjs out/snapshot.json
+        env:
+          # Optional: eigener Schlüssel von coinmarketcap.com/api – dann zeigt die Seite zusätzlich deren Fear & Greed Index
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
       - name: Im Zweig "data" ablegen
         run: |
           cd out

@@ -17,6 +17,13 @@ import { clamp, avg, isNum, num, signed } from './util.js';
 // Anpassungszeitraums am besten, der langfristige Baustein am schlechtesten.
 const W_SHORT = 0.2, W_MEDIUM = 0.25, W_LONG = 0.1, W_REGIME = 0.45;
 const BEAR_CAP = 0.11;          // im Bärenmarkt gibt es kein Kaufsignal
+// Gier-Bremse: Liegt der Fear-&-Greed-Index im 7-Tage-Schnitt zwischen 75 und 85, gibt es keine Kaufsignale.
+// Auswertung 2018–2026: In dieser Zone stand der mittlere Coin 30 Tage später nur in 20–33 % der Fälle höher
+// (Median −19 bis −21 %), und zwar in beiden Prüfzeiträumen und in jeder Marktphase. Im Portfolio blieb die Rendite
+// gleich, der größte Rückgang sank leicht. Über 85 gibt es nur eine einzige Phase (Ende 2020 bis Anfang 2021), in der
+// die Kurse weiter stark stiegen – dafür lässt sich keine Regel belegen, deshalb endet die Bremse dort.
+const GREED_FROM = 75, GREED_TO = 86, GREED_CAP = 0.14;
+export const greedZone = (regime) => isNum(regime?.fng?.avg7) && regime.fng.avg7 >= GREED_FROM && regime.fng.avg7 < GREED_TO;
 const W_NEWS = 0.1;             // Nachrichten verschieben den Score um höchstens ±10 Punkte
 // Schwellen des Gesamt-Scores (-100 … +100). Kaufsignal ab 15: Erst ab dort lag das mittlere Ergebnis
 // nach 7 und nach 30 Tagen im Plus – ein Kaufsignal soll sich mit einer positiven Prognose begründen lassen.
@@ -214,6 +221,22 @@ export function scoreAt(ind, i) {
 
 // ---------- Marktphase ----------
 
+// Fear & Greed im Zeitverlauf. values: Tageswerte, der neueste zuerst.
+// Liefert den heutigen Wert, Mittelwerte und wie viele Tage in Folge der Index schon in einer Zone steht.
+export function fngState(values) {
+  const v = (values ?? []).filter(isNum);
+  if (!v.length) return null;
+  const mean = (n) => avg(v.slice(0, n));
+  const streak = (test) => { let n = 0; while (n < v.length && test(v[n])) n++; return n; };
+  // Anteil der letzten n Tage in einer Zone. Ruhiger als „Tage in Folge“: Ein einzelner Ausreißer reißt die Zählung nicht ab.
+  const share = (n, test) => { const a = v.slice(0, n); return a.filter(test).length / n; };
+  return { value: v[0], avg7: mean(7), avg14: mean(14), avg30: mean(30), days: v.length,
+    extremeFearDays: streak((x) => x < 25), fearDays: streak((x) => x < 45),
+    greedDays: streak((x) => x > 55), extremeGreedDays: streak((x) => x > 75),
+    fearShare60: share(60, (x) => x < 45), extremeFearShare14: share(14, (x) => x < 25),
+    greedShare30: share(30, (x) => x > 55), extremeGreedShare14: share(14, (x) => x > 75) };
+}
+
 // Bewertung der Marktphase aus den Bitcoin-Tageskursen an Stelle j, optional mit Fear & Greed
 export function regimeAt(btc, j, fng) {
   const f = [];
@@ -241,14 +264,19 @@ export function regimeSmooth(btc, j, fngAt = () => undefined, days = 7) {
   const today = regimeAt(btc, j, fngAt(btc.days[j]));
   if (today.score === null) return today;
   let sum = today.score, n = 1;
+  const flags = [today.bear];
   for (let k = 1; k < days && j - k >= 0; k++) {
     const r = regimeAt(btc, j - k, fngAt(btc.days[j - k]));
-    if (r.score !== null) { sum += r.score; n++; }
+    if (r.score !== null) { sum += r.score; n++; flags.push(r.bear); }
   }
-  return { ...today, score: sum / n, today: today.score };
+  // bearShare: Anteil der letzten Tage im Bärenmarkt. Damit greift die Bremse der Reserve über wenige Tage verteilt
+  // statt von einem Tag auf den anderen, und ein Hin und Her an der Grenze gleicht sich aus.
+  const recent = flags.slice(0, BEAR_DAYS);
+  return { ...today, score: sum / n, today: today.score, bearShare: recent.filter(Boolean).length / recent.length };
 }
 
 export const REGIME_DAYS = 14;
+const BEAR_DAYS = 5;   // geprüft mit 1 bis 14 Tagen: bis 5 Tage ohne Einbuße, darüber reagiert die Bremse zu spät
 
 // Was nach vergleichbaren Zyklus-Ständen in 12 Monaten geschah. Die beiden Prüfzeiträume (2018–2022 und 2022–2026)
 // zählen je zur Hälfte, weil sie sich teils stark widersprechen – ein einzelner Zyklus soll das Bild nicht bestimmen.
@@ -289,6 +317,8 @@ const Z7_SHORT = [[20, 0.05], [30, 0.07], [50, 0.21], [65, 0.26]];
 const UP7_SHORT = [[20, 51], [30, 53], [50, 63], [65, 67]];
 // Auf 12 Monate zählt vor allem der Stand im Zyklus; der langfristige Baustein des Coins verschiebt das Ergebnis
 const LONG_ADJ = [[0, -0.1], [10, 0], [30, 0.2], [45, 0.35]];
+// Abschlag auf die 30-Tage-Prognose in der Gier-Zone, in Schwankungs-Einheiten (Mittel beider Prüfzeiträume)
+const GREED_Z30 = -0.4;
 // Gesamtmarkt nach Marktphase: [Marktphase, mittleres Ergebnis in %]
 const M = {
   alt7: [[-30, -1], [30, -1], [40, 0], [55, 3]], btc7: [[-30, 0], [40, 0.5], [55, 2]],
@@ -314,9 +344,12 @@ function longSpan(cycle, btc, longScore) {
 function forecastOf(score, volDaily, shortScore, longScore, regime, btc) {
   const sd = clamp(isNum(volDaily) ? volDaily / 100 : 0.05, 0.015, 0.12);
   const rebound = isNum(shortScore) && shortScore * 100 >= 20;
+  const greed = greedZone(regime);
   const one = (days, pts, [lo, hi], upPts) => {
     let z = curve(score, pts), up = curve(score, upPts);
     if (days === 7 && rebound) { z = Math.max(z, curve(shortScore * 100, Z7_SHORT)); up = Math.max(up, curve(shortScore * 100, UP7_SHORT)); }
+    // Gier-Zone: Auf 30 Tage lagen die Ergebnisse unabhängig vom Score deutlich tiefer (siehe GREED_FROM)
+    if (days === 30 && greed) { z = Math.min(z + GREED_Z30, -0.15); up = Math.min(up - 12, 42); }
     const unit = sd * Math.sqrt(days);
     return span(days, fromLog(z * unit), fromLog((z + lo) * unit), fromLog((z + hi) * unit), up);
   };
@@ -330,11 +363,14 @@ function forecastOf(score, volDaily, shortScore, longScore, regime, btc) {
 function marketForecast(regime, cycle) {
   if (regime.score === null) return null;
   const x = regime.score * 100;
+  // In der Gier-Zone (Fear & Greed im 7-Tage-Schnitt 75–85) gelten für 30 Tage die Ergebnisse dieser Zone:
+  // Bitcoin stand in 33–36 % der Fälle höher (Median −3 bis −7 %), der mittlere Coin in 20–33 % (−19 bis −21 %).
+  const greed = greedZone(regime);
   return {
     btc: { short: span(7, curve(x, M.btc7), curve(x, M.btc7) - 4, curve(x, M.btc7) + 5, curve(x, M.btcUp7)),
-      medium: span(30, curve(x, M.btc30), curve(x, M.btc30) - 10, curve(x, M.btc30) + 13, curve(x, M.btcUp30)), long: longSpan(cycle, true) },
+      medium: greed ? span(30, -5, -10, 5, 34) : span(30, curve(x, M.btc30), curve(x, M.btc30) - 10, curve(x, M.btc30) + 13, curve(x, M.btcUp30)), long: longSpan(cycle, true) },
     alt: { short: span(7, curve(x, M.alt7), curve(x, M.alt7) - 6, curve(x, M.alt7) + 6, curve(x, M.altUp7)),
-      medium: span(30, curve(x, M.alt30), curve(x, M.alt30) - 14, curve(x, M.alt30) + 17, curve(x, M.altUp30)), long: longSpan(cycle, false, null) },
+      medium: greed ? span(30, -20, -26, 2, 27) : span(30, curve(x, M.alt30), curve(x, M.alt30) - 14, curve(x, M.alt30) + 17, curve(x, M.altUp30)), long: longSpan(cycle, false, null) },
   };
 }
 
@@ -405,7 +441,8 @@ export function totalScore(short, medium, long, regime) {
     .filter(([h]) => h && h.score !== null);
   // Ohne eigene Kursdaten des Coins gibt es keine Prognose
   if (!parts.some(([h]) => h !== regime)) return null;
-  const raw = parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+  let raw = parts.reduce((s, [h, w]) => s + h.score * w, 0) / parts.reduce((s, [, w]) => s + w, 0);
+  if (greedZone(regime)) raw = Math.min(raw, GREED_CAP);
   return regime?.bear ? Math.min(raw, BEAR_CAP) : raw;
 }
 
@@ -432,6 +469,10 @@ function assemble(c, short, medium, long, regime, volDaily, news) {
   if (raw === null) return none('Keine Daten', 'Zu wenig Kursdaten für eine Prognose.');
   const notes = [];
   if (news && news.score !== null) raw += W_NEWS * news.score;
+  if (greedZone(regime)) {
+    raw = Math.min(raw, GREED_CAP);
+    notes.push(`Gier-Bremse aktiv: Der Fear-&-Greed-Index liegt im 7-Tage-Schnitt bei ${num(regime.fng.avg7, 0)} (extreme Gier). In solchen Phasen stand der mittlere Coin 30 Tage später nur in rund jedem vierten Fall höher – das Modell gibt dann keine Kaufsignale.`);
+  }
   if (regime.bear) {
     raw = Math.min(raw, BEAR_CAP);
     notes.push('Bärenmarkt-Filter aktiv: Bitcoin liegt unter seinem 200-Tage-Schnitt im Abwärtstrend. In solchen Phasen gibt das Modell keine Kaufsignale.');
@@ -532,6 +573,29 @@ export function quickAnalyse(c, regime) {
   return assemble(c, withDip(withSwing(short, SWING_W.short), c, regime), withSwing(medium, SWING_W.medium), withSwing(long, SWING_W.long), regime, volDaily);
 }
 
+// Stimmung des einzelnen Coins von 0 (Angst) bis 100 (Gier) – ein eigener Wert in der Art des Fear-&-Greed-Index,
+// gerechnet aus dem Kursverlauf: RSI (30 %), Lage in der 30-Tage-Spanne (30 %) und 30-Tage-Veränderung gemessen an
+// der üblichen Schwankung (40 %). Einen fertigen Index je Coin gibt es nicht frei verfügbar.
+// Auswertung 2018–2026: Für sich allein sagt der Wert wenig voraus. Unter 15 folgte in 59 % der Fälle eine Erholung
+// über 7 Tage, nach 30 Tagen stand der Kurs aber nur in 43 % der Fälle höher. Nach mehr als 14 Tagen über 75 stand
+// der Kurs 7 Tage später nur in 43 % der Fälle höher. Deshalb wird der Wert angezeigt, aber nicht in den Score gerechnet
+// (die kurzfristige Erholung nach Ausverkauf steckt schon im kurzfristigen Baustein).
+function moodAt(ind, i) {
+  if (i < 30 || !isNum(ind.swing[i]) || !isNum(ind.rsi[i])) return null;
+  let lo = Infinity, hi = 0;
+  for (let k = i - 29; k <= i; k++) { lo = Math.min(lo, ind.prices[k]); hi = Math.max(hi, ind.prices[k]); }
+  const pos = hi > lo ? (ind.prices[i] - lo) / (hi - lo) * 100 : 50;
+  const z = Math.log(ind.prices[i] / ind.prices[i - 30]) / (ind.swing[i] / 100 * Math.sqrt(30));
+  return 0.3 * ind.rsi[i] + 0.3 * pos + 0.4 * 50 * (1 + Math.tanh(z * 0.8));
+}
+
+export function moodOf(ind) {
+  const i = ind.n - 1, value = moodAt(ind, i);
+  if (value === null) return null;
+  const streak = (test) => { let n = 0; for (let k = i; k > i - 90 && k >= 0; k--) { const m = moodAt(ind, k); if (m === null || !test(m)) break; n++; } return n; };
+  return { value: Math.round(value), fearDays: streak((m) => m < 25), greedDays: streak((m) => m > 75) };
+}
+
 // Verfeinerte Bewertung mit Tageskursen (bis zu 4 Jahre) und Nachrichten
 export function detailAnalyse(c, ind, regime, news) {
   const quick = c.analysis;
@@ -541,27 +605,62 @@ export function detailAnalyse(c, ind, regime, news) {
   // quick.short enthält den Tagesrückgang schon; der Baustein aus Tageskursen bekommt ihn hier dazu
   const short = s.short.score !== null ? withDip(s.short, c, regime) : quick.short;
   const a = assemble(c, short, pick(s.medium, quick.medium), pick(s.long, quick.long), regime, quick.risk.vol, news);
-  if (a.signal !== 'none') a.trade = tradeSetup(c, a, ind, regime);
+  if (a.signal !== 'none') { a.trade = tradeSetup(c, a, ind, regime); a.mood = moodOf(ind); }
   return a;
 }
 
 // ---------- Kurzfristige Handelsmuster ----------
 // Geprüft an Tageskerzen mit Hoch und Tief (84 Coins, 2018–2026), mit 0,5 % Gebühren je Handel und getrennt nach
-// zwei Zeiträumen. Ziel und Stopp sind Vielfache der Tagesschwankung des Coins; trifft eine Kerze beides, zählt
-// der Stopp. Aufgenommen sind nur Muster, die in beiden Zeiträumen im Plus lagen – je Handel und je Signaltag.
-// hit/avg: Anteil der Signaltage im Plus und mittlerer Ertrag je Signaltag (Mittel beider Zeiträume).
-// Kein Short-Muster bestand diese Prüfung (Verkaufs-Score, Bruch des 20-Tage-Tiefs, starke Anstiege).
+// vier Zwei-Jahres-Abschnitten. Ziel und Stopp sind Vielfache der Tagesschwankung des Coins; trifft eine Kerze beides,
+// zählt der Stopp. Aufgenommen sind nur Muster, die je Handel in allen vier Abschnitten im Plus lagen.
+//
+// selloff: Der Coin fiel in 7 Tagen um mindestens 25 % – zusammen mit dem Markt (mittlerer Coin −10 % oder mehr),
+//   außerhalb eines Bärenmarkts und während der Fear-&-Greed-Index nicht in der Angstzone stand (7-Tage-Schnitt ab 45).
+//   Die beiden letzten Bedingungen kamen aus der Prüfung: Fiel ein Coin allein, gab es keinen Vorteil (54 % Treffer,
+//   im Schnitt −0,6 %), und in Angstphasen ging es nach Ausverkäufen in zwei von vier Abschnitten weiter abwärts.
+// score: Prognose-Score ab +40. Mit dem weiteren Ziel (4-fache Schwankung, 14 Tage) war der Vorteil rund dreimal so
+//   groß wie mit dem engen (2-fach, 7 Tage); beide Varianten lagen in allen vier Abschnitten im Plus.
+// hit/avg: Treffer und mittlerer Ertrag je Handel; dayHit/dayAvg: dasselbe je Signaltag gemittelt (ein Tag mit vielen
+//   Signalen zählt dann nur einmal). blocks: mittlerer Ertrag je Handel in den vier Abschnitten.
+// Kein Short-Muster bestand die Prüfung: Von über 20 Varianten (Verkaufs-Score, Erholung im Bärenmarkt, extreme Gier
+// nahe am Hoch, Bruch von Tiefs, starke Anstiege) lag keine in allen vier Abschnitten im Plus; die beste Familie
+// (extreme Gier nahe am Hoch) gewann 2022–2026 und verlor 2020/21 im Schnitt 3–10 % je Handel.
 export const TRADE_SETUPS = {
-  selloff: { label: 'Erholung nach Wochen-Ausverkauf', target: 2, stop: 3, days: 7, hit: 63, avg: 1.9, cases: 2385 },
-  score: { label: 'Sehr starker Score', target: 2, stop: 3, days: 7, hit: 64, avg: 1.1, cases: 5728 },
+  selloff: { label: 'Erholung nach Wochen-Ausverkauf', target: 2, stop: 3, days: 7, hit: 83, avg: 7.3, dayHit: 71, dayAvg: 3.5,
+    cases: 1250, signalDays: 118, blocks: [6.5, 12.5, 6.8, 6.0],
+    caveat: 'Im jüngsten Abschnitt (2024–2026) lagen nur 59 % der Signaltage im Plus; über die Tage gemittelt blieb dort kein Gewinn.' },
+  score: { label: 'Sehr starker Score', target: 4, stop: 3, days: 14, hit: 57, avg: 2.7, dayHit: 68, dayAvg: 3.2,
+    cases: 3183, signalDays: 205, blocks: [1.7, 5.5, 2.0, 4.8], caveat: '' },
 };
-export const TRADE_LIMITS = { selloff: -25, score: 40 };
+export const TRADE_LIMITS = { selloff: -25, score: 40, fng: 45, market: -10 };
+// Die Short-Muster, die der Prüfung am nächsten kamen: mittlerer Ertrag je Handel in % nach Kosten (0,5 % Gebühren und
+// 0,03 % Finanzierung je Tag; Ziel 2-fache, Stopp 3-fache Tagesschwankung, höchstens 7 Tage) in den vier Abschnitten
+// 2018–20, 2020–22, 2022–24 und 2024–26. null: in dem Abschnitt kam das Muster nicht vor.
+export const SHORT_TESTS = [
+  ['Extreme Gier seit 1–7 Tagen, Bitcoin nahe am Allzeithoch (Altcoins)', [null, -3.3, 3.2, 1.8]],
+  ['Verkaufssignal bei stark schwankenden Coins', [-6.1, 1.5, -2.3, 5.0]],
+  ['Fear & Greed kippt aus der Gierzone (Altcoins)', [0.7, -9.9, 1.2, -2.5]],
+  ['Gier-Zone und Coin in 30 Tagen über 30 % gestiegen', [null, -0.5, 1.6, -0.8]],
+  ['Erholung im Bärenmarkt (+20 % in 7 Tagen)', [-1.2, -0.9, -5.5, -0.2]],
+];
+
+// Was Hebel in der Rückrechnung bewirkt hätte: je Signaltag 10 % des Kontos als Sicherheit, auf höchstens 5 Signale
+// verteilt. Liquidation, sobald der Kurs um 0,9 / Hebel fällt; Finanzierungskosten 0,03 % je Tag.
+// [Hebel, Ergebnis pro Jahr in %, größter Rückgang in %, Zahl der Liquidationen]
+export const TRADE_LEVERAGE = {
+  selloff: [[1, 6, 10, 0], [2, 10, 20, 2], [3, 14, 34, 7], [5, 21, 48, 62], [10, 7, 76, 173]],
+  score: [[1, 7, 8, 0], [2, 13, 16, 0], [3, 18, 24, 1], [5, 26, 38, 10], [10, 28, 75, 145]],
+};
 
 function tradeSetup(c, a, ind, regime) {
   const i = ind.n - 1, sw = ind.swing[i], r7 = retAt(ind, i, 7);
   if (!isNum(sw) || sw < 1.5 || sw > 10 || !isNum(c.current_price)) return null;
-  const kind = r7 !== null && r7 <= TRADE_LIMITS.selloff && !regime.bear ? 'selloff' : a.score >= TRADE_LIMITS.score ? 'score' : null;
-  const info = { swing: r1(sw), r7: r7 === null ? null : r1(r7) };
+  const sold = r7 !== null && r7 <= TRADE_LIMITS.selloff && !regime.bear;
+  const calm = isNum(regime?.fng?.avg7) && regime.fng.avg7 >= TRADE_LIMITS.fng;
+  // Der Markt muss mitgefallen sein – fällt ein Coin allein, steckt meist eine schlechte Nachricht dahinter
+  const together = isNum(regime?.marketWeek) && regime.marketWeek <= TRADE_LIMITS.market;
+  const kind = sold && calm && together ? 'selloff' : a.score >= TRADE_LIMITS.score ? 'score' : null;
+  const info = { swing: r1(sw), r7: r7 === null ? null : r1(r7), blocked: !sold ? null : !together ? 'alone' : !calm ? 'fear' : null };
   if (!kind) return { ...info, kind: null };
   const s = TRADE_SETUPS[kind], entry = c.current_price;
   return { ...info, kind, side: 'long', entry, targetPct: r1(s.target * sw), stopPct: r1(s.stop * sw),
@@ -579,12 +678,17 @@ export function marketIndex(coins, btcInd, fng, news) {
   const lastDay = btcInd ? btcInd.days[btcInd.n - 1] : null;
   const fngAt = (d) => fng?.byDay?.get(d) ?? (d === lastDay ? fng?.value : undefined);
   const regime = btcInd ? regimeSmooth(btcInd, btcInd.n - 1, fngAt, REGIME_DAYS) : regimeFromMarket(btc);
+  // Fear & Greed im Zeitverlauf (fng.values: Tageswerte, neuester zuerst) – für Gier-Bremse und Reserve
+  regime.fng = fngState(fng?.values ?? (isNum(fng?.value) ? [fng.value] : []));
   // Stand im Zyklus: Abstand von Bitcoin zu seinem Allzeithoch
   const cycle = isNum(btc.ath_change_percentage) ? cycleInfo(btc.ath_change_percentage) : null;
-  regime.cycle = cycle ? { dd: cycle.dd } : null;
+  regime.cycle = cycle ? { dd: cycle.dd, btcUp: cycle.btcUp } : null;
   // Tagesbewegung des Gesamtmarkts: mittlere 24-Stunden-Veränderung der größten Coins
   const day = top.map((c) => c.price_change_percentage_24h_in_currency).filter(isNum).sort((a, b) => a - b);
   regime.marketDay = day.length ? day[Math.floor(day.length / 2)] : null;
+  // Wochenbewegung des Gesamtmarkts – für das Handelsmuster „Ausverkauf“ (der Markt muss mitgefallen sein)
+  const week = top.map((c) => c.price_change_percentage_7d_in_currency).filter(isNum).sort((a, b) => a - b);
+  regime.marketWeek = week.length ? week[Math.floor(week.length / 2)] : null;
   const share = (key) => {
     const vals = top.map((c) => c[key]).filter(isNum);
     return vals.length ? vals.filter((v) => v > 0).length / vals.length : 0.5;
@@ -600,7 +704,12 @@ export function marketIndex(coins, btcInd, fng, news) {
   parts.push(factor('Marktbreite', `${num(up7 * 100, 0)} % der Top 200 im Plus über 7 Tage, ${num(up30 * 100, 0)} % über 30 Tage`, clamp((up7 + up30 - 1) * 1.5), 0.2));
   if (news && news.score !== null) parts.push(factor('Nachrichtenlage', news.text, news.score, 0.1));
 
-  const value = Math.round(50 + 50 * combine(parts));
+  let value = Math.round(50 + 50 * combine(parts));
+  if (greedZone(regime)) {
+    // Der Index darf nicht „Kaufen“ sagen, während die Gier-Bremse alle Kaufsignale sperrt
+    value = Math.min(value, 56);
+    parts.push(factor('Gier-Bremse', `Fear & Greed im 7-Tage-Schnitt bei ${num(regime.fng.avg7, 0)} – nach solchen Phasen fielen die meisten Coins; der Index bleibt höchstens bei „Halten“`, -1, 0));
+  }
   let signal, label;
   if (value >= 68) [signal, label] = ['buy', 'Kaufen'];
   else if (value >= 57) [signal, label] = ['buy', 'Eher kaufen'];
@@ -651,6 +760,11 @@ export function backtest(ind, btcInd, fngByDay, days) {
     if (btcIndex && j === undefined) continue;
     const s = scoreAt(ind, i);
     const regime = btcInd ? regimeSmooth(btcInd, j, (d) => fngByDay?.get(d), REGIME_DAYS) : horizon([]);
+    if (fngByDay) {
+      const week = [];
+      for (let k = 0; k < 7; k++) { const x = fngByDay.get(ind.days[i] - k); if (isNum(x)) week.push(x); }
+      if (week.length >= 5) regime.fng = { avg7: avg(week) };
+    }
     const raw = totalScore(s.short, s.medium, s.long, regime);
     if (raw === null) continue;
     const [signal] = signalOf(Math.round(raw * 100));

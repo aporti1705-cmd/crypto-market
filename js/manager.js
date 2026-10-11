@@ -2,7 +2,8 @@
 //
 // Grundsätze (in dieser Reihenfolge):
 //   1. Erst das Risiko: Wie viel überhaupt investiert sein soll, bestimmt die Marktphase.
-//      Im Bärenmarkt bleibt der Großteil in Reserve (Stablecoins/Bargeld).
+//      Im Bärenmarkt bleibt der Großteil in Reserve (Stablecoins/Bargeld). Nach langer Angst tief im Zyklus
+//      wird antizyklisch in Bitcoin und Ethereum aufgestockt.
 //   2. Verlierer raus: Coins mit Verkaufssignal werden verkauft, schwache zuerst reduziert.
 //   3. Gewinner laufen lassen, aber Klumpen vermeiden: Obergrenze je Position, Teilverkauf
 //      bei hohen Gewinnen, wenn der Trend überdehnt ist.
@@ -19,19 +20,17 @@ export const DEFAULTS = {
   minTradeShare: 0.04,    // kleinere Abweichungen vom Ziel werden nicht gehandelt
   minTradeUsd: 20,
   swapGap: 30,            // so viele Score-Punkte muss ein neuer Coin besser sein, damit getauscht wird
-  buyScore: 12,
   profitGain: 0.6,        // ab diesem Kursgewinn wird Gewinnmitnahme geprüft
   profitGainHigh: 1.5,
   trailStop: 0.25,        // Verkauf, wenn der Kurs so weit unter sein Hoch seit dem Kauf fällt
   stopLoss: null,         // Verkauf, wenn der Kurs so weit unter den Kaufpreis fällt
   pairSwaps: true,        // Verkäufe und Käufe als Tausch vorschlagen
-  // Grundlage des Reserve-Vorschlags: 'momentum' (Marktphase), 'cycle' (antizyklisch) oder 'blend' (je zur Hälfte).
-  // Rein antizyklisch brachte in der Rückrechnung nur rund 29 % pro Jahr, weil es die Anstiege nahe am Hoch verpasst;
-  // die Mischung lag gleichauf mit der reinen Marktphase, schwankt aber deutlich weniger von Tag zu Tag.
-  exposureBy: 'blend',
   coreFill: true,         // tief im Zyklus Bitcoin und Ethereum auch ohne Kaufsignal aufstocken
   coreFillDd: -40,        // ab diesem Abstand zum Allzeithoch gilt der Markt als tief im Zyklus
   profitRepeat: 1.3,      // erneute Gewinnmitnahme erst, wenn der Kurs seit der letzten um 30 % gestiegen ist
+  // Fear & Greed verschiebt die Investitionsquote (siehe fngTilt), Angaben als Anteil des Portfolios:
+  fearTilt: 0.5,          // so viel mehr investieren nach langer Angst tief im Zyklus
+  greedTilt: 0,           // so viel weniger investieren bei extremer Gier nahe am Allzeithoch
 };
 
 const CORE = new Set(['bitcoin', 'ethereum']);
@@ -41,21 +40,44 @@ const RISK_CAP = [1, 1, 0.75, 0.5];      // riskante Coins bekommen eine kleiner
 // Abgewerteter Score: riskantere Coins brauchen einen höheren Score für denselben Rang
 export const adjusted = (a) => (a.score ?? 0) * RISK_WEIGHT[a.risk?.level ?? 2];
 
-// Investitionsquote je Marktphase: Stützpunkte [Score der Marktphase, Anteil investiert], dazwischen linear.
-// Beide Kurven wurden mit Gebühren über 2018–2026 zurückgerechnet (wöchentliche Prüfung, 86 Coins):
-//   ausgewogen: rund +64 % pro Jahr, größter zwischenzeitlicher Rückgang 49 %
-//   vorsichtig: rund +53 % pro Jahr, größter zwischenzeitlicher Rückgang 39 %
-// (jeweils zur Hälfte mit der antizyklischen Zyklus-Kurve gemischt, Marktphase über 14 Tage geglättet)
+// ---------- Investitionsquote ----------
+//
+// Die Quote folgt der Marktphase (Stützpunkte [Score der Marktphase, Anteil investiert], dazwischen linear), im
+// Bärenmarkt gilt eine Obergrenze. Dazu kommt der Fear-&-Greed-Index als Zu- oder Abschlag (fngTilt).
+//
+// Rückrechnung mit 0,25 % Gebühr, wöchentliche Prüfung, 84 Coins, 2018–2026, Mittel aus 7 Starttagen
+// (pro Jahr / größter zwischenzeitlicher Rückgang; in Klammern 2018–22 und 2022–26):
+//   Mit dem Trend + Angst-Käufe (Standard)        +86 % / −40 %   (+115 % / +61 %)
+//   Antizyklisch (Angst-Käufe und Gier-Abschlag)  +67 % / −40 %   (+80 % / +57 %)
+//   Vorsichtig                                    +59 % / −25 %   (+88 % / +35 %)
+// Zum Vergleich, jeweils schlechter:
+//   Mischung aus Marktphase und Zyklus (Stand bis Oktober 2026)   +60 % / −46 %
+//   nur nach dem Zyklus (Abstand zum Allzeithoch)                 +39 % / −54 %
+//   nur nach Fear & Greed (Angst = investiert, Gier = Reserve)    +29 % / −56 %
+//   Bitcoin halten                                                +38 % / −77 %
 // Die vorsichtige Kurve folgt dem halben Kelly-Anteil je Marktphase: Chance geteilt durch Schwankung der
-// 30-Tage-Ergebnisse. Feinere Unterschiede zwischen ähnlichen Kurven lagen im Rauschen der Rückrechnung.
+// 30-Tage-Ergebnisse. Feinere Unterschiede zwischen ähnlichen Kurven lagen im Rauschen der Rückrechnung
+// (je nach Starttag schwankt das Ergebnis um rund ±10 Prozentpunkte pro Jahr).
 export const EXPOSURE_CURVES = {
   balanced: [[-0.4, 0.15], [-0.2, 0.3], [0, 0.55], [0.2, 0.85], [0.4, 1]],
   cautious: [[-0.2, 0], [-0.1, 0.1], [0, 0.2], [0.1, 0.3], [0.3, 0.4], [0.4, 0.7], [0.55, 1]],
 };
 export const EXPOSURE_CURVE = EXPOSURE_CURVES.balanced;
+
+// Die drei wählbaren Strategien für das Reserve-Ziel
+export const RESERVE_MODES = {
+  balanced: { label: 'Mit dem Trend', options: {},
+    text: 'Folgt der Marktphase, bremst im Bärenmarkt und kauft nach langer Angst tief im Zyklus Bitcoin und Ethereum nach.' },
+  contrarian: { label: 'Antizyklisch', options: { fearTilt: 0.85, greedTilt: 0.5 },
+    text: 'Wie „Mit dem Trend“, aber an den Extremen stärker: nach langer Angst fast voll investiert, bei extremer Gier nahe am Allzeithoch die Hälfte in Reserve.' },
+  cautious: { label: 'Vorsichtig', options: { exposureCurve: EXPOSURE_CURVES.cautious, fearTilt: 0.3 },
+    text: 'Hält deutlich mehr Reserve und investiert erst bei sehr starker Marktphase voll.' },
+};
+// perYear/drawdown: 2018–2026; recent: 2022–2026 (schwächerer der beiden Prüfzeiträume)
 export const RESERVE_BACKTEST = {
-  balanced: { perYear: 69, drawdown: 45 },
-  cautious: { perYear: 61, drawdown: 37 },
+  balanced: { perYear: 86, recent: 61, drawdown: 40 },
+  contrarian: { perYear: 67, recent: 57, drawdown: 40 },
+  cautious: { perYear: 59, recent: 35, drawdown: 25 },
 };
 
 // Was der Gesamtmarkt 30 Tage nach einer vergleichbaren Marktphase getan hat (alle 86 Coins, 2018–2026):
@@ -64,24 +86,60 @@ const PHASE_HISTORY = [[-0.2, 38, -27], [0, 45, -27], [0.2, 49, -25], [0.4, 50, 
 
 // Vorschläge für die Reserve in der aktuellen Marktphase, mit den Erfahrungswerten dazu
 export function reserveAdvice(regime) {
-  const pct = (curve) => Math.round((1 - suggestedExposure(regime, { ...DEFAULTS, exposureCurve: curve }).share) * 100);
   const r = regime?.score;
   const row = r === null || r === undefined ? null : PHASE_HISTORY.find(([limit]) => r < limit);
-  return {
-    balanced: pct(EXPOSURE_CURVES.balanced), cautious: pct(EXPOSURE_CURVES.cautious),
-    text: suggestedExposure(regime, DEFAULTS).text, bear: !!regime?.bear,
-    history: row ? { up: row[1], worst: row[2] } : null,
-  };
+  const out = { text: suggestedExposure(regime, DEFAULTS).text, bear: !!regime?.bear, history: row ? { up: row[1], worst: row[2] } : null, texts: {} };
+  for (const [key, mode] of Object.entries(RESERVE_MODES)) {
+    const e = suggestedExposure(regime, { ...DEFAULTS, ...mode.options });
+    out[key] = Math.round((1 - e.share) * 100);
+    out.texts[key] = e.text;
+  }
+  return out;
 }
 
 // Vorgeschlagene Investitionsquote nach den gewählten Einstellungen
-function suggestedExposure(regime, o) {
-  const dd = regime?.cycle?.dd;
-  const momentum = exposureFor(regime, o.exposureCurve, o.exposureBy === 'momentum' ? o.bearShare : 1);
-  if (o.exposureBy === 'momentum' || !Number.isFinite(dd)) return exposureFor(regime, o.exposureCurve, o.bearShare);
-  const cycle = cycleExposure(dd, o.exposureBy === 'blend' ? momentum.share : null, o.cycleCurve);
-  return { share: cycle.share, text: o.exposureBy === 'blend' ? `${momentum.text} ${cycle.text}` : cycle.text };
+export function suggestedExposure(regime, o = DEFAULTS) {
+  const base = exposureFor(regime, o.exposureCurve, o.bearShare);
+  const tilt = fngTilt(regime, o);
+  if (!tilt.delta) return base;
+  const share = Math.round(Math.min(1, Math.max(0, base.share + tilt.delta)) * 20) / 20;
+  return { share, text: `${base.text} ${tilt.text}`.trim(), fear: tilt.fear > 0, greed: tilt.greed > 0 };
 }
+
+const unit = (x) => Math.min(1, Math.max(0, x));
+
+// Fear & Greed als Zu- oder Abschlag auf die Investitionsquote – nur dort, wo die Rückrechnung es stützt.
+//
+// Angst-Zuschlag: Stand der Index an mindestens 9 von 10 der letzten 60 Tage in der Angstzone (unter 45) oder fast
+// durchgehend 14 Tage in extremer Angst (unter 25) und liegt Bitcoin mindestens 30–40 % unter seinem Allzeithoch,
+// wird mehr investiert. Ohne Kaufsignale fließt das Geld in Bitcoin und Ethereum (siehe coreFill).
+// Auswertung: Nach mindestens 60 Tagen Angst stand Bitcoin ein Jahr später in 84–100 % der Fälle höher; im Portfolio
+// brachte der Zuschlag in beiden Prüfzeiträumen mehr Rendite (gesamt +72 % → +86 % pro Jahr) bei kleinerem Rückgang.
+// Für Altcoins gilt das nicht: Sie standen ein Jahr nach extremer Angst meist tiefer.
+//
+// Gier-Abschlag: Liegt der 7-Tage-Schnitt über 68 (voll ab 80) und Bitcoin höchstens 15–25 % unter dem Allzeithoch,
+// wird weniger investiert. Das kostete in der Rückrechnung Rendite (2018–22 deutlich, 2022–26 kaum) und senkte den
+// größten Rückgang nur 2022–26 leicht – deshalb ist es nur in der Strategie „Antizyklisch“ eingeschaltet.
+const FEAR = { shareFrom: 0.9, shareFull: 1, extremeFrom: 0.8, extremeFull: 1, ddFrom: -30, ddFull: -40 };
+const GREED = { from: 68, full: 80, ddFrom: -25, ddFull: -15 };
+
+export function fngTilt(regime, o = DEFAULTS) {
+  const f = regime?.fng, dd = regime?.cycle?.dd;
+  const none = { delta: 0, fear: 0, greed: 0, text: '' };
+  if (!f || !Number.isFinite(f.avg7) || !Number.isFinite(dd)) return none;
+  const deep = unit((FEAR.ddFrom - dd) / (FEAR.ddFrom - FEAR.ddFull));
+  const fear = !o.fearTilt ? 0 : deep * Math.max(unit((f.fearShare60 - FEAR.shareFrom) / (FEAR.shareFull - FEAR.shareFrom)),
+    unit((f.extremeFearShare14 - FEAR.extremeFrom) / (FEAR.extremeFull - FEAR.extremeFrom)));
+  const greed = !o.greedTilt ? 0 : unit((f.avg7 - GREED.from) / (GREED.full - GREED.from)) * unit((dd - GREED.ddFrom) / (GREED.ddFull - GREED.ddFrom));
+  const delta = fear * o.fearTilt - greed * o.greedTilt;
+  if (!delta) return none;
+  const points = Math.round(Math.abs(delta) * 100);
+  const text = delta > 0
+    ? `Ausnahme für Bitcoin und Ethereum: Der Fear-&-Greed-Index steht seit Wochen in der Angstzone (${Math.round(f.fearShare60 * 60)} der letzten 60 Tage) und Bitcoin liegt ${Math.round(-dd)} % unter seinem Allzeithoch. Nach solchen Phasen stand Bitcoin ein Jahr später meist höher – deshalb ${points} Punkte weniger Reserve, investiert nur in diese beiden.`
+    : `Extreme Gier nahe am Allzeithoch (Fear & Greed im 7-Tage-Schnitt bei ${Math.round(f.avg7)}): ${points} Punkte mehr Reserve.`;
+  return { delta, fear, greed, text };
+}
+
 const BEAR_SHARE = 0.15;
 
 function interpolate(x, pts) {
@@ -95,28 +153,20 @@ function interpolate(x, pts) {
   return pts[pts.length - 1][1];
 }
 
-// Antizyklische Investitionsquote: [Abstand von Bitcoin zum Allzeithoch in %, Anteil investiert]
-export const CYCLE_CURVE = [[-70, 1], [-55, 0.9], [-40, 0.7], [-25, 0.4], [-10, 0.25], [0, 0.15]];
-
-function cycleExposure(dd, blendWith = null, curve = CYCLE_CURVE) {
-  let share = interpolate(dd, curve ?? CYCLE_CURVE);
-  if (blendWith !== null) share = (share + blendWith) / 2;
-  share = Math.round(share * 20) / 20;
-  const text = dd <= -55 ? 'Bitcoin steht tief unter seinem Allzeithoch – historisch die besten Einstiegsphasen.'
-    : dd <= -25 ? 'Bitcoin steht deutlich unter seinem Allzeithoch.'
-      : dd <= -10 ? 'Bitcoin nähert sich seinem Allzeithoch – Zeit, Gewinne schrittweise zu sichern.'
-        : 'Bitcoin steht nahe am Allzeithoch – historisch schlechte Einstiegsphasen, hohe Reserve.';
-  return { share, text };
-}
-
 // Wie viel des Portfolios investiert sein soll, abhängig von der Marktphase (in 5-%-Schritten)
 export function exposureFor(regime, curve = EXPOSURE_CURVE, bearShare = BEAR_SHARE) {
   const r = regime?.score;
   if (r === null || r === undefined) return { share: 0.5, text: 'Marktphase unbekannt – die Hälfte bleibt in Reserve.' };
-  let share = Math.round(interpolate(r, curve) * 20) / 20;
-  if (regime.bear && share > bearShare) {
-    return { share: bearShare, text: 'Bärenmarkt (Bitcoin unter dem 200-Tage-Schnitt, Abwärtstrend): Großteil in Reserve halten.' };
+  let share = interpolate(r, curve ?? EXPOSURE_CURVE);
+  // Bärenbremse: Je mehr der letzten Tage im Bärenmarkt lagen, desto stärker gilt die Obergrenze. So greift sie über
+  // wenige Tage verteilt und springt nicht hin und her, wenn Bitcoin um die Grenze pendelt.
+  const b = regime.bearShare ?? (regime.bear ? 1 : 0);
+  if (b > 0 && share > bearShare) {
+    share = Math.round((share * (1 - b) + bearShare * b) * 20) / 20;
+    return { share, text: b >= 0.5 ? 'Bärenmarkt (Bitcoin unter dem 200-Tage-Schnitt, Abwärtstrend): Großteil in Reserve halten.'
+      : 'Der Markt kippt in einen Bärenmarkt – Reserve schrittweise erhöhen.' };
   }
+  share = Math.round(share * 20) / 20;
   const text = r >= 0.4 ? 'Sehr starke Marktphase.' : r >= 0.2 ? 'Gute Marktphase.' : r >= 0 ? 'Gemischte Marktphase.'
     : r >= -0.2 ? 'Schwache Marktphase.' : 'Sehr schwache Marktphase.';
   return { share, text };
@@ -307,7 +357,7 @@ export function plan({ holdings, cash = 0, candidates = [], core = [], regime, o
     } else {
       if (c.coreBuy && signal(c) !== 'buy') moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
         goal: 'Antizyklisch einsteigen, solange der Markt tief im Zyklus steht.',
-        reason: `Bitcoin liegt ${Math.round(-dd)} % unter seinem Allzeithoch. Aus solchen Phasen stand Bitcoin ein Jahr später in der Vergangenheit fast immer höher – kurzfristig kann der Kurs aber weiter fallen.`,
+        reason: `Bitcoin liegt ${Math.round(-dd)} % unter seinem Allzeithoch. Aus vergleichbaren Ständen stand Bitcoin ein Jahr später ${Number.isFinite(regime.cycle.btcUp) ? `in ${regime.cycle.btcUp} % der Fälle` : 'meist'} höher – kurzfristig kann der Kurs aber weiter fallen.${suggested.fear ? ' Dazu steht der Fear-&-Greed-Index seit Wochen in der Angstzone.' : ''}`,
         horizon: 'Haltedauer: mindestens 12 Monate.', review: review(30), reviewText: 'In Raten kaufen und monatlich prüfen.' });
       else moves.push({ ...base, type: c.held ? 'add' : 'buy', title: c.held ? `${c.name} nachkaufen` : `${c.name} kaufen`,
         goal: c.held ? 'Eine starke Position ausbauen, solange das Kaufsignal steht.' : 'Freie Reserve in einen Coin mit starkem Signal investieren.',

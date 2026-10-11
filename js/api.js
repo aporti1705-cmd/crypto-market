@@ -83,6 +83,28 @@ export async function history(symbol) {
   return data;
 }
 
+// Kurse der letzten 24 Stunden in 5-Minuten-Schritten von Binance (Tagesansicht). Gibt null zurück, wenn der Coin
+// dort nicht oder nicht mehr gehandelt wird.
+const INTRADAY_TTL_MS = 2 * 60_000;
+const intradays = new Map();
+
+export async function intraday(symbol) {
+  const pair = symbol.toUpperCase() + 'USDT';
+  const hit = intradays.get(pair);
+  if (hit && Date.now() - hit.time < INTRADAY_TTL_MS) return hit.data;
+  let data = null;
+  const res = await fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${encodeURIComponent(pair)}&interval=5m&limit=288`);
+  if (res.ok) {
+    const rows = await res.json();
+    // Spalten: 0 = Beginn der Kerze, 4 = Schlusskurs. Alte Kerzen heißen: Das Paar wird nicht mehr gehandelt.
+    if (rows.length >= 50 && Date.now() - rows[rows.length - 1][0] < 30 * 60_000) {
+      data = { t: rows.map((r) => r[0]), p: rows.map((r) => Number(r[4])) };
+    }
+  }
+  intradays.set(pair, { time: Date.now(), data });
+  return data;
+}
+
 // Aktuelle Kurse aller Binance-Handelspaare – zeigt, welche Coins dort eine Kursgeschichte haben
 export async function binancePrices() {
   const res = await fetch('https://data-api.binance.vision/api/v3/ticker/price');
